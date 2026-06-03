@@ -37,9 +37,9 @@ async def start(update, context):
                 for f in files_db[key]:
                     try: await context.bot.copy_message(chat_id=user.id, from_chat_id=f['chat_id'], message_id=f['message_id'])
                     except: continue
-            else: await update.message.reply_text("⛔ Membership expire ho gayi hai.")
+            else: await update.message.reply_text("😒 Your membership is not active.\n\n You have either not yet purchased a membership, or it has expired.\n\n💰 Buy Now - @theHeisenberg009")
         else: await update.message.reply_text("❌ File not found.")
-    else: await update.message.reply_text("Namaste! Prince Bot active hai. /info dekhein.")
+    else: await update.message.reply_text("Hi,\n\nTo Watch the videos, you need to subscribe to a membership.\n\n💰 Membership Buy Now - @theHeisenberg009\n\n helping - /info")
 
 async def info(update, context):
     msg = ("📜 **Commands Tutorial:**\n\n"
