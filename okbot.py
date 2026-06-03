@@ -52,8 +52,26 @@ async def start(update, context):
     else: 
         await update.message.reply_text("🫡 Hi, I'm Heisenberg \n\nTo Watch the videos, you need to subscribe to a membership.", reply_markup=get_buy_keyboard())
 
+# --- EXPORT / IMPORT (Backup Features) ---
+async def export_data(update, context):
+    if update.message.from_user.id != ADMIN_ID: return
+    data_str = str(files_db)
+    for i in range(0, len(data_str), 4000):
+        await update.message.reply_text(f"📂 **Backup Data Part:**\n\n{data_str[i:i+4000]}")
+
+async def import_data(update, context):
+    if update.message.from_user.id != ADMIN_ID: return
+    try:
+        imported_text = " ".join(context.args)
+        global files_db
+        files_db = eval(imported_text)
+        await update.message.reply_text("✅ सारा डेटा सफलतापूर्वक ट्रांसफर हो गया!")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+# --- COMMANDS ---
 async def info(update, context):
-    msg = ("📜 **Commands Tutorial:**\n\n \n\n📌 /savebatch [L1] [L2] [NAME]\n\n🧑‍🤝‍🧑 /addcode [CODE] [DAYS] [USES]\n\n🕺 /redeem [CODE]\n\n👁️ /stats\n\n📳 /broadcast [MSG]\n\n👟 /ban [ID]\n/reminder")
+    msg = ("📜 **Commands Tutorial:**\n\n \n\n📌 /savebatch [L1] [L2] [NAME]\n\n🧑‍🤝‍🧑 /addcode [CODE] [DAYS] [USES]\n\n🕺 /redeem [CODE]\n\n👁️ /stats\n\n📳 /broadcast [MSG]\n\n👟 /ban [ID]\n/reminder\n/export\n/import [DATA]")
     await update.message.reply_text(msg)
 
 async def stats(update, context):
@@ -126,6 +144,8 @@ app.add_handler(CommandHandler("broadcast", broadcast))
 app.add_handler(CommandHandler("reminder", reminder_broadcast))
 app.add_handler(CommandHandler("ban", ban))
 app.add_handler(CommandHandler("info", info))
+app.add_handler(CommandHandler("export", export_data))
+app.add_handler(CommandHandler("import", import_data))
 app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.ALL, save_file))
 
 print("Master Bot is Running!")
