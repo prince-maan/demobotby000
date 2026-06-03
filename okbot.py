@@ -53,7 +53,7 @@ async def start(update, context):
         await update.message.reply_text("🫡 Hi, I'm Heisenberg \n\nTo Watch the videos, you need to subscribe to a membership.", reply_markup=get_buy_keyboard())
 
 async def info(update, context):
-    msg = ("📜 **Commands Tutorial:**\n\n \n\n/savebatch [L1] [L2] [NAME]\n\n/addcode [CODE] [DAYS] [USES]\n\n/redeem [CODE]\n\n/stats/n\n/broadcast [MSG]\n\n/ban [ID]\n/reminder")
+    msg = ("📜 **Commands Tutorial:**\n\n \n\n/savebatch [L1] [L2] [NAME]\n\n/addcode [CODE] [DAYS] [USES]\n\n/redeem [CODE]\n\n /stats/n\n/broadcast [MSG]\n\n/ban [ID]\n/reminder")
     await update.message.reply_text(msg)
 
 async def stats(update, context):
