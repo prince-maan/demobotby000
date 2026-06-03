@@ -1,10 +1,20 @@
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
 import datetime
 import asyncio
+import os
+from flask import Flask
+from threading import Thread
+
+# --- KEEP-ALIVE SERVER (होस्टिंग के लिए जरूरी) ---
+app_flask = Flask(__name__)
+@app_flask.route('/')
+def home(): return "Bot is active!"
+def run_flask(): app_flask.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
+Thread(target=run_flask).start()
 
 # --- SETTINGS ---
 TOKEN = '8896341222:AAFqDx4VaRfkgXWJDM0TxyAncHiiX2RUNeo'
-ADMIN_ID = 8855787926
+ADMIN_ID = 123456789
 BOT_USERNAME = "mynew778899bot"
 
 # --- DATABASE ---
@@ -124,5 +134,5 @@ app.add_handler(CommandHandler("ban", ban))
 app.add_handler(CommandHandler("info", info))
 app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.ALL, save_file))
 
-print("Bot is ready with total summary stats!")
+print("Bot is ready with Flask Keep-Alive!")
 app.run_polling()
