@@ -14,7 +14,7 @@ Thread(target=run_flask).start()
 
 # --- SETTINGS ---
 TOKEN = '8896341222:AAFqDx4VaRfkgXWJDM0TxyAncHiiX2RUNeo'
-ADMIN_ID = 123456789
+ADMIN_ID = 8855787926
 BOT_USERNAME = "mynew778899bot"
 
 # --- DATABASE ---
