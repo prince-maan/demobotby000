@@ -39,7 +39,7 @@ async def start(update, context):
                     except: continue
             else: await update.message.reply_text("😒 Your membership is not active.\n\n You have either not yet purchased a membership, or it has expired.\n\n💰 Buy Now - @theHeisenberg009")
         else: await update.message.reply_text("❌ File not found.")
-    else: await update.message.reply_text("Hi,\n\nTo Watch the videos, you need to subscribe to a membership.\n\n💰 Membership Buy Now - @theHeisenberg009\n\n helping - /info")
+    else: await update.message.reply_text("🫡 Hi, I'm Heisenberg\n\nTo Watch the videos, you need to subscribe to a membership.\n\n💰 Membership Buy Now - @theHeisenberg009\n\n helping - /info")
 
 async def info(update, context):
     msg = ("📜 **Commands Tutorial:**\n\n"
