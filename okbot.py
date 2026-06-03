@@ -35,7 +35,9 @@ async def start(update, context):
         if key in files_db:
             if user.id == ADMIN_ID or (user.id in user_membership and datetime.datetime.now() < user_membership[user.id]['expiry']):
                 for f in files_db[key]:
-                    try: await context.bot.copy_message(chat_id=user.id, from_chat_id=f['chat_id'], message_id=f['message_id'])
+                    try: 
+                        # Content Protection: Forwarding disabled
+                        await context.bot.copy_message(chat_id=user.id, from_chat_id=f['chat_id'], message_id=f['message_id'], protect_content=True)
                     except: continue
             else: await update.message.reply_text("😒 Your membership is not active.\n\n You have either not yet purchased a membership, or it has expired.\n\n💰 Buy Now - @theHeisenberg009")
         else: await update.message.reply_text("❌ File not found.")
@@ -50,7 +52,6 @@ async def info(update, context):
 async def stats(update, context):
     if update.message.from_user.id != ADMIN_ID: return
     now = datetime.datetime.now()
-    
     total_users = len(all_users)
     membership_users = len(user_membership)
     non_membership = total_users - membership_users
@@ -95,10 +96,15 @@ async def save_file(update, context):
 async def broadcast(update, context):
     if update.message.from_user.id == ADMIN_ID and context.args:
         msg = " ".join(context.args)
+        success = 0
+        failed = 0
         for u in all_users:
-            try: await context.bot.send_message(u, msg)
-            except: continue
-        await update.message.reply_text("✅ Broadcast successful!")
+            try: 
+                await context.bot.send_message(u, msg)
+                success += 1
+            except: 
+                failed += 1
+        await update.message.reply_text(f"✅ Broadcast Report:\n👤 Sent to: {success} users\n🚫 Failed/Blocked: {failed} users")
 
 async def ban(update, context):
     if update.message.from_user.id == ADMIN_ID and context.args:
@@ -134,5 +140,5 @@ app.add_handler(CommandHandler("ban", ban))
 app.add_handler(CommandHandler("info", info))
 app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.ALL, save_file))
 
-print("Bot is ready with Flask Keep-Alive!")
+print("Bot is ready with Content Protection and Broadcast Report!")
 app.run_polling()
