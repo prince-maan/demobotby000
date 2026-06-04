@@ -40,7 +40,6 @@ async def start(update, context):
     if context.args:
         key = context.args[0]
         if key in files_db:
-            # Check membership
             if user.id == ADMIN_ID or (user.id in user_membership and datetime.datetime.now() < user_membership[user.id]['expiry']):
                 for f in files_db[key]:
                     try: 
@@ -52,7 +51,7 @@ async def start(update, context):
     else: 
         await update.message.reply_text("🫡 Hi, I'm Heisenberg \n\nTo Watch the videos, you need to subscribe to a membership.", reply_markup=get_buy_keyboard())
 
-# --- BACKUP FEATURES ---
+# --- DATA MANAGEMENT ---
 async def export_data(update, context):
     if update.message.from_user.id != ADMIN_ID: return
     data_str = str(files_db)
@@ -82,11 +81,21 @@ async def stats(update, context):
 async def stats_pro(update, context):
     if update.message.from_user.id != ADMIN_ID: return
     now = datetime.datetime.now()
-    msg = f"📊 **DETAILED STATISTICS**\n\n✅ Active Members:\n"
+    msg = f"📊 **DETAILED ACTIVE MEMBERS**\n\n"
     for uid, data in user_membership.items():
-        days_left = (data['expiry'] - now).days
-        if days_left >= 0:
-            msg += f"👤 {data['name']} (ID: {uid})\n🔑 Code: {data['code']}\n📅 {days_left} days left\n------------------------\n"
+        if now < data['expiry']:
+            remaining = data['expiry'] - now
+            days = remaining.days
+            hours = remaining.seconds // 3600
+            minutes = (remaining.seconds % 3600) // 60
+            
+            msg += (f"👤 Name: {data['name']}\n"
+                    f"🆔 ID: {uid}\n"
+                    f"🔑 Code Used: {data['code']}\n"
+                    f"📅 Joined On: {data.get('join_date', 'N/A')}\n"
+                    f"⏳ Remaining: {days}d, {hours}h, {minutes}m\n"
+                    f"------------------------\n")
+    if not msg.endswith("------------------------\n"): msg += "No active members."
     for i in range(0, len(msg), 4000):
         await update.message.reply_text(msg[i:i+4000])
 
@@ -98,26 +107,23 @@ async def cancel_membership(update, context):
             del user_membership[user_id]
             await update.message.reply_text(f"✅ User {user_id} ki membership cancel kar di gayi hai.")
         else: await update.message.reply_text("❌ Ye user active member nahi hai.")
-    else: await update.message.reply_text("⚠️ Usage: /cancel_membership [USER_ID]")
 
 async def broadcast(update, context):
     if update.message.from_user.id == ADMIN_ID and context.args:
         msg = " ".join(context.args)
-        success, failed = 0, 0
         for u in all_users:
-            try: await context.bot.send_message(u, msg); success += 1
-            except: failed += 1
-        await update.message.reply_text(f"✅ Broadcast Report:\n👤 Sent: {success}\n🚫 Failed: {failed}")
+            try: await context.bot.send_message(u, msg)
+            except: pass
+        await update.message.reply_text("✅ Broadcast complete.")
 
 async def reminder_broadcast(update, context):
     if update.message.from_user.id != ADMIN_ID: return
     now = datetime.datetime.now()
-    count = 0
     for uid, data in user_membership.items():
         if now < data['expiry'] and (data['expiry'] - now).days <= 2:
-            try: await context.bot.send_message(uid, "⚠️ Alert: Membership expiring soon!\n💰 Renew: " + BUY_LINK); count += 1
-            except: continue
-    await update.message.reply_text(f"✅ Reminder sent to {count} members.")
+            try: await context.bot.send_message(uid, "⚠️ Alert: Membership expiring soon!\n💰 Renew: " + BUY_LINK)
+            except: pass
+    await update.message.reply_text("✅ Reminders sent.")
 
 async def save_file(update, context):
     if update.message.from_user.id != ADMIN_ID: return
@@ -138,18 +144,16 @@ async def save_batch(update, context):
 
 async def ban(update, context):
     if update.message.from_user.id == ADMIN_ID: 
-        try:
-            banned_users.add(int(context.args[0]))
-            await update.message.reply_text("🚫 Banned.")
-        except: pass
+        banned_users.add(int(context.args[0])); await update.message.reply_text("🚫 Banned.")
 
 async def redeem(update, context):
     user = update.message.from_user
     code = context.args[0] if context.args else ""
     if code in valid_codes and valid_codes[code]['uses_left'] > 0:
         valid_codes[code]['uses_left'] -= 1
-        expiry = datetime.datetime.now() + datetime.timedelta(days=valid_codes[code]['days'])
-        user_membership[user.id] = {'name': user.first_name, 'expiry': expiry, 'code': code}
+        now = datetime.datetime.now()
+        expiry = now + datetime.timedelta(days=valid_codes[code]['days'])
+        user_membership[user.id] = {'name': user.first_name, 'expiry': expiry, 'code': code, 'join_date': now.strftime("%Y-%m-%d %H:%M")}
         await update.message.reply_text("✅ Membership activated!")
     else: await update.message.reply_text("❌ Invalid code!")
 
