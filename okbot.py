@@ -1,6 +1,7 @@
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 import datetime
+import pytz
 import os
 from flask import Flask
 from threading import Thread
@@ -17,6 +18,7 @@ TOKEN = '8120598596:AAGCBHAbhc7V_Jnj8Z0H85QpLaDk3WCACLU'
 ADMIN_ID = 8717007836
 BOT_USERNAME = "lite0000op_bot"
 BUY_LINK = "https://t.me/SaulGoodmanOp"
+IST = pytz.timezone('Asia/Kolkata')
 
 # --- 3. DATABASE ---
 user_membership = {}
@@ -25,22 +27,12 @@ valid_codes = {}
 all_users = {}        
 banned_users = set()
 
-# --- 4. COMMANDS & FUNCTIONS ---
-
+# --- 4. FUNCTIONS ---
 async def start(update, context):
     user = update.message.from_user
     if user.id in banned_users: return
     all_users[user.id] = {'name': user.first_name}
-    if context.args:
-        key = context.args[0]
-        if key in files_db:
-            if user.id == ADMIN_ID or (user.id in user_membership and datetime.datetime.now() < user_membership[user.id]['expiry']):
-                for f in files_db[key]:
-                    try: await context.bot.copy_message(chat_id=user.id, from_chat_id=f['chat_id'], message_id=f['message_id'], protect_content=True)
-                    except: continue
-            else: await update.message.reply_text("😒 Membership inactive.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💰 Buy", url=BUY_LINK)]]))
-        else: await update.message.reply_text("❌ File not found.")
-    else: await update.message.reply_text("🫡 Hi! Subscribe to access content.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💰 Buy Membership", url=BUY_LINK)]]))
+    await update.message.reply_text("🫡 Hi! Subscribe to get access.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💰 Buy Membership", url=BUY_LINK)]]))
 
 async def addcode(update, context):
     if update.message.from_user.id != ADMIN_ID: return
@@ -55,8 +47,14 @@ async def redeem(update, context):
     code = context.args[0] if context.args else ""
     if code in valid_codes and valid_codes[code]['uses_left'] > 0:
         valid_codes[code]['uses_left'] -= 1
-        now = datetime.datetime.now()
-        user_membership[user.id] = {'name': user.first_name, 'expiry': now + datetime.timedelta(days=valid_codes[code]['days']), 'code': code, 'join_date': now.strftime("%Y-%m-%d %H:%M")}
+        now = datetime.datetime.now(IST)
+        expiry = now + datetime.timedelta(days=valid_codes[code]['days'])
+        user_membership[user.id] = {
+            'name': user.first_name, 
+            'expiry': expiry, 
+            'code': code, 
+            'join_date': now.strftime("%Y-%m-%d %I:%M %p")
+        }
         await update.message.reply_text("✅ Membership activated!")
     else: await update.message.reply_text("❌ Invalid code.")
 
@@ -64,11 +62,11 @@ async def stats(update, context):
     if update.message.from_user.id != ADMIN_ID: return
     total = len(all_users)
     active = len(user_membership)
-    await update.message.reply_text(f"📊 **STATISTICS**\n👥 Total Users: {total}\n✅ Active: {active}\n❌ Non-Members: {total - active}")
+    await update.message.reply_text(f"📊 **STATISTICS**\n👥 Total Users: {total}\n✅ Memberships Taken: {active}\n❌ Not Taken: {total - active}")
 
 async def stats_pro(update, context):
     if update.message.from_user.id != ADMIN_ID: return
-    now = datetime.datetime.now()
+    now = datetime.datetime.now(IST)
     msg = "📊 **ACTIVE MEMBERS LIST**\n\n"
     for uid, data in user_membership.items():
         if now < data['expiry']:
@@ -77,8 +75,14 @@ async def stats_pro(update, context):
                 member = await context.bot.get_chat_member(uid, uid)
                 username = f"@{member.user.username}" if member.user.username else "No Username"
             except: username = "N/A"
-            msg += f"👤 {data['name']} | {username}\n🆔 {uid}\n🔑 {data['code']}\n📅 {data.get('join_date', 'N/A')}\n⏳ {rem.days}d {rem.seconds//3600}h\n----------------\n"
-    await update.message.reply_text(msg if user_membership else "No active members.")
+            msg += (f"👤 {data['name']} | {username}\n"
+                    f"🆔 {uid}\n"
+                    f"🔑 {data['code']}\n"
+                    f"📅 {data.get('join_date', 'N/A')}\n"
+                    f"⏳ {rem.days}d {rem.seconds//3600}h {(rem.seconds%3600)//60}m\n"
+                    f"------------------------\n")
+    if not user_membership: msg += "No active members."
+    for i in range(0, len(msg), 4000): await update.message.reply_text(msg[i:i+4000])
 
 async def cancel_membership(update, context):
     if update.message.from_user.id != ADMIN_ID: return
@@ -86,8 +90,8 @@ async def cancel_membership(update, context):
         uid = int(context.args[0])
         if uid in user_membership:
             del user_membership[uid]
-            await update.message.reply_text(f"✅ Membership cancelled for {uid}")
-        else: await update.message.reply_text("❌ Not found.")
+            await update.message.reply_text(f"✅ User {uid} membership cancelled.")
+        else: await update.message.reply_text("❌ User not found.")
 
 async def broadcast(update, context):
     if update.message.from_user.id == ADMIN_ID and context.args:
