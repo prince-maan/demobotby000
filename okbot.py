@@ -1,7 +1,6 @@
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, CallbackQueryHandler
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 import datetime
-import asyncio
 import os
 from flask import Flask
 from threading import Thread
@@ -41,6 +40,7 @@ async def start(update, context):
     if context.args:
         key = context.args[0]
         if key in files_db:
+            # Check membership
             if user.id == ADMIN_ID or (user.id in user_membership and datetime.datetime.now() < user_membership[user.id]['expiry']):
                 for f in files_db[key]:
                     try: 
@@ -52,7 +52,7 @@ async def start(update, context):
     else: 
         await update.message.reply_text("🫡 Hi, I'm Heisenberg \n\nTo Watch the videos, you need to subscribe to a membership.", reply_markup=get_buy_keyboard())
 
-# --- EXPORT / IMPORT (Backup Features) ---
+# --- BACKUP FEATURES ---
 async def export_data(update, context):
     if update.message.from_user.id != ADMIN_ID: return
     data_str = str(files_db)
@@ -71,7 +71,7 @@ async def import_data(update, context):
 
 # --- COMMANDS ---
 async def info(update, context):
-    msg = ("📜 **Commands Tutorial:**\n\n📌 /savebatch [L1] [L2] [NAME]\n🧑‍🤝‍🧑 /addcode [CODE] [DAYS] [USES]\n🕺 /redeem [CODE]\n👁️ /stats\n📊 /stats_pro\n📳 /broadcast [MSG]\n👟 /ban [ID]\n/reminder\n/export\n/import [DATA]")
+    msg = ("📜 **Commands Tutorial:**\n\n📌 /savebatch [L1] [L2] [NAME]\n🧑‍🤝‍🧑 /addcode [CODE] [DAYS] [USES]\n🕺 /redeem [CODE]\n👁️ /stats\n📊 /stats_pro\n❌ /cancel_membership [ID]\n📳 /broadcast [MSG]\n👟 /ban [ID]\n/reminder\n/export\n/import [DATA]")
     await update.message.reply_text(msg)
 
 async def stats(update, context):
@@ -82,17 +82,23 @@ async def stats(update, context):
 async def stats_pro(update, context):
     if update.message.from_user.id != ADMIN_ID: return
     now = datetime.datetime.now()
-    total_users = len(all_users)
-    msg = (f"📊 **DETAILED STATISTICS**\n\n"
-           f"👥 Total Users: {total_users}\n"
-           f"✅ Active Members: {len(user_membership)}\n\n"
-           f"📜 **Active Membership Details:**\n")
+    msg = f"📊 **DETAILED STATISTICS**\n\n✅ Active Members:\n"
     for uid, data in user_membership.items():
         days_left = (data['expiry'] - now).days
         if days_left >= 0:
-            msg += (f"👤 {data['name']}\n🔑 Code: {data['code']}\n📅 Expiry In: {days_left} days\n------------------------\n")
+            msg += f"👤 {data['name']} (ID: {uid})\n🔑 Code: {data['code']}\n📅 {days_left} days left\n------------------------\n"
     for i in range(0, len(msg), 4000):
         await update.message.reply_text(msg[i:i+4000])
+
+async def cancel_membership(update, context):
+    if update.message.from_user.id != ADMIN_ID: return
+    if context.args:
+        user_id = int(context.args[0])
+        if user_id in user_membership:
+            del user_membership[user_id]
+            await update.message.reply_text(f"✅ User {user_id} ki membership cancel kar di gayi hai.")
+        else: await update.message.reply_text("❌ Ye user active member nahi hai.")
+    else: await update.message.reply_text("⚠️ Usage: /cancel_membership [USER_ID]")
 
 async def broadcast(update, context):
     if update.message.from_user.id == ADMIN_ID and context.args:
@@ -131,7 +137,11 @@ async def save_batch(update, context):
     except: await update.message.reply_text("❌ Error!")
 
 async def ban(update, context):
-    if update.message.from_user.id == ADMIN_ID: banned_users.add(int(context.args[0])); await update.message.reply_text("🚫 Banned.")
+    if update.message.from_user.id == ADMIN_ID: 
+        try:
+            banned_users.add(int(context.args[0]))
+            await update.message.reply_text("🚫 Banned.")
+        except: pass
 
 async def redeem(update, context):
     user = update.message.from_user
@@ -156,6 +166,7 @@ app.add_handler(CommandHandler("redeem", redeem))
 app.add_handler(CommandHandler("addcode", addcode))
 app.add_handler(CommandHandler("stats", stats))
 app.add_handler(CommandHandler("stats_pro", stats_pro))
+app.add_handler(CommandHandler("cancel_membership", cancel_membership))
 app.add_handler(CommandHandler("broadcast", broadcast))
 app.add_handler(CommandHandler("reminder", reminder_broadcast))
 app.add_handler(CommandHandler("ban", ban))
