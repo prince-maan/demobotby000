@@ -18,7 +18,7 @@ TOKEN = '8120598596:AAGCBHAbhc7V_Jnj8Z0H85QpLaDk3WCACLU'
 ADMIN_ID = 8717007836
 BOT_USERNAME = "lite0000op_bot"
 BUY_LINK = "https://t.me/theHeisenberg009"
-DB_CHANNEL_ID = -100XXXXXXXXXX # यहाँ अपना डेटाबेस चैनल ID डालें
+DB_CHANNEL_ID = -1003911523030 # यहाँ अपना डेटाबेस चैनल ID डालें
 
 # --- 3. DATABASE ---
 user_membership = {}
