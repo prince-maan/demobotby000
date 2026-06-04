@@ -38,38 +38,29 @@ async def start(update, context):
                 for f in files_db[key]:
                     try: await context.bot.copy_message(chat_id=user.id, from_chat_id=f['chat_id'], message_id=f['message_id'], protect_content=True)
                     except: continue
-            else: await update.message.reply_text("😒 Your membership is not active.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💰 Buy Membership", url=BUY_LINK)]]))
+            else: await update.message.reply_text("😒 Membership inactive or expired.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💰 Buy Membership", url=BUY_LINK)]]))
         else: await update.message.reply_text("❌ File not found.")
-    else: await update.message.reply_text("🫡 Hi, I'm Heisenberg.\n\nTo Watch the videos, you need to subscribe to a membership.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💰 Buy Membership", url=BUY_LINK)]]))
+    else: await update.message.reply_text("🫡 Hi, I'm Heisenberg.\n\nSubscribe to get access.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💰 Buy Membership", url=BUY_LINK)]]))
+
+async def stats(update, context):
+    if update.message.from_user.id != ADMIN_ID: return
+    total = len(all_users)
+    active = len(user_membership)
+    await update.message.reply_text(f"📊 **STATISTICS**\n👥 Total Users: {total}\n✅ Memberships Taken: {active}\n❌ Not Taken: {total - active}")
 
 async def stats_pro(update, context):
     if update.message.from_user.id != ADMIN_ID: return
     now = datetime.datetime.now()
-    total = len(all_users)
-    active = len(user_membership)
-    
-    msg = (f"📊 **DETAILED STATISTICS**\n\n"
-           f"👥 Total Users: {total}\n"
-           f"✅ Active Members: {active}\n"
-           f"❌ Non-Members: {total - active}\n\n"
-           f"📜 **Active Members Details:**\n")
-    
+    msg = "📊 **DETAILED ACTIVE MEMBERS**\n\n"
     for uid, data in user_membership.items():
         if now < data['expiry']:
             rem = data['expiry'] - now
-            # Username fetch karne ki koshish
             try:
                 member = await context.bot.get_chat_member(uid, uid)
                 username = f"@{member.user.username}" if member.user.username else "No Username"
             except: username = "N/A"
-            
-            msg += (f"👤 Name: {data['name']} | {username}\n"
-                    f"🆔 ID: {uid}\n"
-                    f"🔑 Code: {data['code']}\n"
-                    f"📅 Joined: {data.get('join_date', 'N/A')}\n"
-                    f"⏳ Remaining: {rem.days}d {rem.seconds // 3600}h {(rem.seconds % 3600) // 60}m\n"
-                    f"------------------------\n")
-    
+            msg += (f"👤 {data['name']} | {username}\n🆔 {uid}\n🔑 {data['code']}\n📅 {data.get('join_date', 'N/A')}\n⏳ {rem.days}d {rem.seconds//3600}h {(rem.seconds%3600)//60}m\n------------------------\n")
+    if not user_membership: msg += "No active members."
     for i in range(0, len(msg), 4000): await update.message.reply_text(msg[i:i+4000])
 
 async def redeem(update, context):
@@ -88,8 +79,8 @@ async def cancel_membership(update, context):
         uid = int(context.args[0])
         if uid in user_membership:
             del user_membership[uid]
-            await update.message.reply_text(f"✅ User {uid} ki membership cancel kar di gayi hai.")
-        else: await update.message.reply_text("❌ Ye user active member nahi hai.")
+            await update.message.reply_text(f"✅ User {uid} membership cancelled.")
+        else: await update.message.reply_text("❌ User not found in active members.")
 
 async def broadcast(update, context):
     if update.message.from_user.id == ADMIN_ID and context.args:
@@ -97,16 +88,25 @@ async def broadcast(update, context):
         for u in all_users:
             try: await context.bot.send_message(u, msg)
             except: pass
-        await update.message.reply_text("✅ Broadcast complete.")
+        await update.message.reply_text("✅ Broadcast done.")
 
-# --- HANDLERS SETUP ---
+async def save_batch(update, context):
+    if update.message.from_user.id != ADMIN_ID: return
+    try:
+        f = context.args[0]; c = int("-100"+f.split('/')[4]); s = int(f.split('/')[5]); e = int(context.args[1].split('/')[-1])
+        files_db[context.args[2]] = [{'chat_id': c, 'message_id': i} for i in range(s, e + 1)]
+        await update.message.reply_text("✅ Batch Saved!")
+    except: await update.message.reply_text("❌ Error in batch saving!")
+
+# --- 6. APP SETUP ---
 app = ApplicationBuilder().token(TOKEN).build()
 app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("stats", stats))
 app.add_handler(CommandHandler("stats_pro", stats_pro))
 app.add_handler(CommandHandler("redeem", redeem))
 app.add_handler(CommandHandler("cancel_membership", cancel_membership))
 app.add_handler(CommandHandler("broadcast", broadcast))
-# Add other handlers (savebatch, addcode, etc.) as you had before...
+app.add_handler(CommandHandler("savebatch", save_batch))
 
 print("Master Bot is Running!")
 app.run_polling()
