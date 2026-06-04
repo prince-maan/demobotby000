@@ -1,4 +1,4 @@
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, CallbackQueryHandler
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 import datetime
 import asyncio
@@ -17,14 +17,13 @@ Thread(target=run_flask).start()
 TOKEN = '8120598596:AAGCBHAbhc7V_Jnj8Z0H85QpLaDk3WCACLU'
 ADMIN_ID = 8717007836
 BOT_USERNAME = "lite0000op_bot"
-BUY_LINK = "https://t.me/theHeisenberg009"
-DB_CHANNEL_ID = -100XXXXXXXXXX # यहाँ अपना डेटाबेस चैनल ID डालें
+BUY_LINK = "https://t.me/SaulGoodmanOp"
 
 # --- 3. DATABASE ---
 user_membership = {}
-files_db = {}
-valid_codes = {}
-all_users = {}
+files_db = {}         
+valid_codes = {}      
+all_users = {}        
 banned_users = set()
 
 # --- 4. BUTTONS ---
@@ -48,43 +47,52 @@ async def start(update, context):
                         await context.bot.copy_message(chat_id=user.id, from_chat_id=f['chat_id'], message_id=f['message_id'], protect_content=True)
                     except: continue
             else: 
-                await update.message.reply_text("😒 Your membership is not active.", reply_markup=get_buy_keyboard())
+                await update.message.reply_text("😒 Your membership is not active.\n\n You have either not yet purchased a membership, or it has expired.", reply_markup=get_buy_keyboard())
         else: await update.message.reply_text("❌ File not found.")
     else: 
         await update.message.reply_text("🫡 Hi, I'm Heisenberg \n\nTo Watch the videos, you need to subscribe to a membership.", reply_markup=get_buy_keyboard())
 
-# --- NEW FEATURE: SUBSCRIPTION LIST ---
-async def sub_list(update, context):
-    if update.message.from_user.id != ADMIN_ID: return
-    now = datetime.datetime.now()
-    text = "📊 **ACTIVE SUBSCRIPTIONS:**\n\n"
-    for uid, data in user_membership.items():
-        if now < data['expiry']:
-            remaining = (data['expiry'] - now).days
-            text += f"👤 {data['name']} (ID: {uid})\n⏳ Expire in: {remaining} days\n🏷 Code: {data['code']}\n\n"
-    
-    await context.bot.send_message(chat_id=DB_CHANNEL_ID, text=text)
-    await update.message.reply_text("✅ List has been sent to your Database Channel!")
-
-# --- OLD FEATURES PRESERVED ---
+# --- EXPORT / IMPORT (Backup Features) ---
 async def export_data(update, context):
     if update.message.from_user.id != ADMIN_ID: return
     data_str = str(files_db)
     for i in range(0, len(data_str), 4000):
-        await update.message.reply_text(f"📂 **Backup:**\n\n{data_str[i:i+4000]}")
+        await update.message.reply_text(f"📂 **Backup Data Part:**\n\n{data_str[i:i+4000]}")
 
 async def import_data(update, context):
     if update.message.from_user.id != ADMIN_ID: return
     try:
+        imported_text = " ".join(context.args)
         global files_db
-        files_db = eval(" ".join(context.args))
-        await update.message.reply_text("✅ Data imported!")
-    except Exception as e: await update.message.reply_text(f"❌ Error: {str(e)}")
+        files_db = eval(imported_text)
+        await update.message.reply_text("✅ सारा डेटा सफलतापूर्वक ट्रांसफर हो गया!")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+# --- COMMANDS ---
+async def info(update, context):
+    msg = ("📜 **Commands Tutorial:**\n\n📌 /savebatch [L1] [L2] [NAME]\n🧑‍🤝‍🧑 /addcode [CODE] [DAYS] [USES]\n🕺 /redeem [CODE]\n👁️ /stats\n📊 /stats_pro\n📳 /broadcast [MSG]\n👟 /ban [ID]\n/reminder\n/export\n/import [DATA]")
+    await update.message.reply_text(msg)
 
 async def stats(update, context):
     if update.message.from_user.id != ADMIN_ID: return
     msg = f"📊 **STATISTICS**\n👥 Total: {len(all_users)}\n✅ Active: {len(user_membership)}\n🚫 Banned: {len(banned_users)}"
     await update.message.reply_text(msg)
+
+async def stats_pro(update, context):
+    if update.message.from_user.id != ADMIN_ID: return
+    now = datetime.datetime.now()
+    total_users = len(all_users)
+    msg = (f"📊 **DETAILED STATISTICS**\n\n"
+           f"👥 Total Users: {total_users}\n"
+           f"✅ Active Members: {len(user_membership)}\n\n"
+           f"📜 **Active Membership Details:**\n")
+    for uid, data in user_membership.items():
+        days_left = (data['expiry'] - now).days
+        if days_left >= 0:
+            msg += (f"👤 {data['name']}\n🔑 Code: {data['code']}\n📅 Expiry In: {days_left} days\n------------------------\n")
+    for i in range(0, len(msg), 4000):
+        await update.message.reply_text(msg[i:i+4000])
 
 async def broadcast(update, context):
     if update.message.from_user.id == ADMIN_ID and context.args:
@@ -93,7 +101,7 @@ async def broadcast(update, context):
         for u in all_users:
             try: await context.bot.send_message(u, msg); success += 1
             except: failed += 1
-        await update.message.reply_text(f"✅ Sent: {success}\n🚫 Failed: {failed}")
+        await update.message.reply_text(f"✅ Broadcast Report:\n👤 Sent: {success}\n🚫 Failed: {failed}")
 
 async def reminder_broadcast(update, context):
     if update.message.from_user.id != ADMIN_ID: return
@@ -103,7 +111,7 @@ async def reminder_broadcast(update, context):
         if now < data['expiry'] and (data['expiry'] - now).days <= 2:
             try: await context.bot.send_message(uid, "⚠️ Alert: Membership expiring soon!\n💰 Renew: " + BUY_LINK); count += 1
             except: continue
-    await update.message.reply_text(f"✅ Reminders sent to {count} members.")
+    await update.message.reply_text(f"✅ Reminder sent to {count} members.")
 
 async def save_file(update, context):
     if update.message.from_user.id != ADMIN_ID: return
@@ -140,17 +148,18 @@ async def addcode(update, context):
         valid_codes[context.args[0]] = {'days': int(context.args[1]), 'uses_left': int(context.args[2])}
         await update.message.reply_text(f"✅ Code {context.args[0]} added!")
 
-# --- APP SETUP ---
+# --- 6. APP SETUP ---
 app = ApplicationBuilder().token(TOKEN).build()
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("savebatch", save_batch))
 app.add_handler(CommandHandler("redeem", redeem))
 app.add_handler(CommandHandler("addcode", addcode))
 app.add_handler(CommandHandler("stats", stats))
+app.add_handler(CommandHandler("stats_pro", stats_pro))
 app.add_handler(CommandHandler("broadcast", broadcast))
 app.add_handler(CommandHandler("reminder", reminder_broadcast))
 app.add_handler(CommandHandler("ban", ban))
-app.add_handler(CommandHandler("sublist", sub_list)) # New Command
+app.add_handler(CommandHandler("info", info))
 app.add_handler(CommandHandler("export", export_data))
 app.add_handler(CommandHandler("import", import_data))
 app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.ALL, save_file))
