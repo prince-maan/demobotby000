@@ -14,9 +14,9 @@ def run_flask(): app_flask.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8
 Thread(target=run_flask).start()
 
 # --- 2. SETTINGS ---
-TOKEN = '8896341222:AAFqDx4VaRfkgXWJDM0TxyAncHiiX2RUNeo'
-ADMIN_ID = 8855787926
-BOT_USERNAME = "mynew778899bot"
+TOKEN = '8120598596:AAGCBHAbhc7V_Jnj8Z0H85QpLaDk3WCACLU'
+ADMIN_ID = 8717007836
+BOT_USERNAME = "lite0000op_bot"
 BUY_LINK = "https://t.me/theHeisenberg009"
 
 # --- 3. DATABASE ---
