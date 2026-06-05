@@ -65,22 +65,22 @@ async def start(update, context):
                 # --------------------------------------------------
                 
             else: 
-                await update.message.reply_text("😒 Membership inactive or expired.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💰 Buy Membership", url=BUY_LINK)]]))
+                await update.message.reply_text("⚠️ Important Notice/n/n/n• You haven't purchased a membership here, or your membership has expired./n/n• आपने यहाँ कोई मेंबरशिप नहीं खरीदी है, या आपकी मेंबरशिप की समय-सीमा समाप्त हो गई है।/n/n/n🔮 Purchase membership here:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💰 Buy Membership", url=BUY_LINK)]]))
         else: 
             await update.message.reply_text("❌ File not found.")
     else: 
-        await update.message.reply_text("🫡 Hi, I'm Heisenberg.\n\nTo watch videos, subscribe to a membership.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💰 Buy Membership", url=BUY_LINK)]]))
+        await update.message.reply_text("🫡 Hi, I'm Saul.\n\nTo watch videos, subscribe to a membership.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💰 Buy Membership", url=BUY_LINK)]]))
 
 async def info(update, context):
     msg = ("📜 **Commands Tutorial:**\n\n"
-           "📌 /savebatch [Link1] [Link2] [NAME]\n"
-           "🧑‍🤝‍🧑 /addcode [CODE] [DAYS] [USES]\n"
-           "🕺 /redeem [CODE]\n"
-           "👁️ /stats\n"
-           "📳 /broadcast [MESSAGE]\n"
-           "💳 /cancel [ID]\n"
-           "👟 /ban [ID]\n"
-           "📤 /export\n"
+           "📌 /savebatch [Link1] [Link2] [NAME]\n\n"
+           "🧑‍🤝‍🧑 /addcode [CODE] [DAYS] [USES]\n\n"
+           "🕺 /redeem [CODE]\n\n"
+           "👁️ /stats\n\n"
+           "📳 /broadcast [MESSAGE]\n\n"
+           "💳 /cancel [ID]\n\n"
+           "👟 /ban [ID]\n\n"
+           "📤 /export\n\n"
            "📥 /import [DATA]")
     await update.message.reply_text(msg)
 
