@@ -33,7 +33,6 @@ async def start(update, context):
     user = update.message.from_user
     if user.id in banned_users: return
     
-    # यूजर को डेटाबेस में सेव करना (Username के साथ)
     uname = f"@{user.username}" if user.username else "No Username"
     all_users[user.id] = {'name': user.first_name, 'username': uname}
     
@@ -41,13 +40,30 @@ async def start(update, context):
         key = context.args[0]
         if key in files_db:
             if user.id == ADMIN_ID or (user.id in user_membership and datetime.datetime.now(IST) < user_membership[user.id]['expiry']):
-                for f in files_db[key]:
+                
+                # --- NAYA LOGIC: HORIZONTAL & VERTICAL SUPPORT ---
+                if len(files_db[key]) == 1:
+                    # Single File Logic
+                    f = files_db[key][0]
                     try: 
                         if f.get('caption'):
                             await context.bot.copy_message(chat_id=user.id, from_chat_id=f['chat_id'], message_id=f['message_id'], protect_content=True, caption=f['caption'])
                         else:
                             await context.bot.copy_message(chat_id=user.id, from_chat_id=f['chat_id'], message_id=f['message_id'], protect_content=True)
-                    except: continue
+                    except: pass
+                else:
+                    # Batch File Logic (Fast & Supports Albums)
+                    source_chat = files_db[key][0]['chat_id']
+                    msg_ids = [f['message_id'] for f in files_db[key]]
+                    
+                    for i in range(0, len(msg_ids), 100):
+                        chunk = msg_ids[i:i+100]
+                        try:
+                            await context.bot.copy_messages(chat_id=user.id, from_chat_id=source_chat, message_ids=chunk, protect_content=True)
+                        except Exception as e:
+                            print(f"Batch sending error: {e}")
+                # --------------------------------------------------
+                
             else: 
                 await update.message.reply_text("😒 Membership inactive or expired.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💰 Buy Membership", url=BUY_LINK)]]))
         else: 
@@ -87,7 +103,6 @@ async def redeem(update, context):
         now = datetime.datetime.now(IST)
         expiry_date = now + datetime.timedelta(days=valid_codes[code]['days'])
         
-        # यहाँ Username भी सेव हो रहा है
         uname = f"@{user.username}" if user.username else "No Username"
         user_membership[user.id] = {
             'name': user.first_name, 
