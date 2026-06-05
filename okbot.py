@@ -65,7 +65,7 @@ async def start(update, context):
                 # --------------------------------------------------
                 
             else: 
-                await update.message.reply_text("⚠️ Important Notice/n/n/n• You haven't purchased a membership here, or your membership has expired./n/n• आपने यहाँ कोई मेंबरशिप नहीं खरीदी है, या आपकी मेंबरशिप की समय-सीमा समाप्त हो गई है।/n/n/n🔮 Purchase membership here:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💰 Buy Membership", url=BUY_LINK)]]))
+                await update.message.reply_text("⚠️ Important Notice\n\n\n• You haven't purchased a membership here, or your membership has expired.\n\n• आपने यहाँ कोई मेंबरशिप नहीं खरीदी है, या आपकी मेंबरशिप की समय-सीमा समाप्त हो गई है।\n\n\n🔮 Purchase membership here:\n", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💰 Buy Membership", url=BUY_LINK)]]))
         else: 
             await update.message.reply_text("❌ File not found.")
     else: 
