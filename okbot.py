@@ -14,9 +14,9 @@ def run_flask(): app_flask.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8
 Thread(target=run_flask).start()
 
 # --- 2. SETTINGS ---
-TOKEN = '8120598596:AAHe91PxDQSCFGQl68rxw0rgUne6f7Sa9zI'
-ADMIN_ID = 8717007836
-BOT_USERNAME = "lite0000op_bot"
+TOKEN = '8760244596:AAHbZdwxz2e9Ddbvy0zfAi6B6aBrgsr65ig'
+ADMIN_ID = 8895101534
+BOT_USERNAME = "newaurVid_bot"
 BUY_LINK = "https://t.me/SaulGoodmanOp"
 IST = pytz.timezone('Asia/Kolkata')
 
