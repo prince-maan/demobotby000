@@ -32,54 +32,52 @@ banned_users = set()
 async def start(update, context):
     user = update.message.from_user
     if user.id in banned_users: return
-    all_users[user.id] = {'name': user.first_name}
+    
+    # यूजर को डेटाबेस में सेव करना (Username के साथ)
+    uname = f"@{user.username}" if user.username else "No Username"
+    all_users[user.id] = {'name': user.first_name, 'username': uname}
+    
     if context.args:
         key = context.args[0]
         if key in files_db:
             if user.id == ADMIN_ID or (user.id in user_membership and datetime.datetime.now(IST) < user_membership[user.id]['expiry']):
                 for f in files_db[key]:
-                    try: await context.bot.copy_message(chat_id=user.id, from_chat_id=f['chat_id'], message_id=f['message_id'], protect_content=True, caption=f.get('caption', ""))
+                    try: 
+                        if f.get('caption'):
+                            await context.bot.copy_message(chat_id=user.id, from_chat_id=f['chat_id'], message_id=f['message_id'], protect_content=True, caption=f['caption'])
+                        else:
+                            await context.bot.copy_message(chat_id=user.id, from_chat_id=f['chat_id'], message_id=f['message_id'], protect_content=True)
                     except: continue
-            else: await update.message.reply_text("😒 Membership inactive.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💰 Buy Membership", url=BUY_LINK)]]))
-        else: await update.message.reply_text("❌ File not found.")
-    else: await update.message.reply_text("🫡 Hi, I'm Heisenberg.\n\nTo watch videos, subscribe to a membership.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💰 Buy Membership", url=BUY_LINK)]]))
+            else: 
+                await update.message.reply_text("😒 Membership inactive or expired.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💰 Buy Membership", url=BUY_LINK)]]))
+        else: 
+            await update.message.reply_text("❌ File not found.")
+    else: 
+        await update.message.reply_text("🫡 Hi, I'm Heisenberg.\n\nTo watch videos, subscribe to a membership.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💰 Buy Membership", url=BUY_LINK)]]))
 
-async def stats(update, context):
-    if update.message.from_user.id != ADMIN_ID: return
-    now = datetime.datetime.now(IST)
-    active_list = []
-    for uid, d in user_membership.items():
-        if now < d['expiry']:
-            rem = d['expiry'] - now
-            active_list.append(f"👤 {d['name']} | 🎫 {d['code']}\n📅 जॉइन: {d['join_date']}\n⏳ खत्म: {d['expiry'].strftime('%Y-%m-%d %H:%M')}")
-    
-    msg = f"📊 **STATISTICS**\n👥 कुल: {len(all_users)}\n✅ एक्टिव: {len(active_list)}\n🚫 बैन: {len(banned_users)}\n\n📋 **एक्टिव मेंबर्स:**\n" + "\n\n".join(active_list)
+async def info(update, context):
+    msg = ("📜 **Commands Tutorial:**\n\n"
+           "📌 /savebatch [Link1] [Link2] [NAME]\n"
+           "🧑‍🤝‍🧑 /addcode [CODE] [DAYS] [USES]\n"
+           "🕺 /redeem [CODE]\n"
+           "👁️ /stats\n"
+           "📳 /broadcast [MESSAGE]\n"
+           "💳 /cancel [ID]\n"
+           "👟 /ban [ID]\n"
+           "📤 /export\n"
+           "📥 /import [DATA]")
     await update.message.reply_text(msg)
 
-async def broadcast(update, context):
-    if update.message.from_user.id == ADMIN_ID and context.args:
-        msg = " ".join(context.args)
-        sent, blocked = 0, 0
-        for u in all_users:
-            try: 
-                await context.bot.send_message(u, msg)
-                sent += 1
-            except: blocked += 1
-        await update.message.reply_text(f"✅ Broadcast Report:\nSent: {sent}\nBlocked: {blocked}")
-
-async def save_file(update, context):
-    if update.message.from_user.id != ADMIN_ID: return
-    key = f"file_{update.message.message_id}"
-    files_db[key] = [{'chat_id': update.effective_chat.id, 'message_id': update.message.message_id, 'caption': update.message.caption or ""}]
-    await update.message.reply_text(f"✅ Saved! Link: t.me/{BOT_USERNAME}?start={key}")
-
-async def save_batch(update, context):
+async def addcode(update, context):
     if update.message.from_user.id != ADMIN_ID: return
     try:
-        f = context.args[0]; c = int("-100"+f.split('/')[4]); s = int(f.split('/')[5]); e = int(context.args[1].split('/')[-1]); name = context.args[2]
-        files_db[name] = [{'chat_id': c, 'message_id': i, 'caption': ""} for i in range(s, e + 1)]
-        await update.message.reply_text(f"✅ Batch Saved!\n🔗 Link: t.me/{BOT_USERNAME}?start={name}")
-    except: await update.message.reply_text("❌ Error!")
+        code = context.args[0]
+        days = int(context.args[1])
+        uses = int(context.args[2])
+        valid_codes[code] = {'days': days, 'uses_left': uses}
+        await update.message.reply_text(f"✅ Code '{code}' added!\n⏳ Validity: {days} Days\n👥 Uses Limit: {uses}")
+    except: 
+        await update.message.reply_text("❌ Format Error! Use: /addcode [CODE] [DAYS] [USES]")
 
 async def redeem(update, context):
     user = update.message.from_user
@@ -87,26 +85,148 @@ async def redeem(update, context):
     if code in valid_codes and valid_codes[code]['uses_left'] > 0:
         valid_codes[code]['uses_left'] -= 1
         now = datetime.datetime.now(IST)
-        user_membership[user.id] = {'name': user.first_name, 'expiry': now + datetime.timedelta(days=valid_codes[code]['days']), 'code': code, 'join_date': now.strftime("%Y-%m-%d %H:%M")}
-        await update.message.reply_text("✅ Membership activated!")
-    else: await update.message.reply_text("❌ Invalid code!")
+        expiry_date = now + datetime.timedelta(days=valid_codes[code]['days'])
+        
+        # यहाँ Username भी सेव हो रहा है
+        uname = f"@{user.username}" if user.username else "No Username"
+        user_membership[user.id] = {
+            'name': user.first_name, 
+            'username': uname,
+            'expiry': expiry_date, 
+            'code': code, 
+            'join_date': now.strftime("%Y-%m-%d %I:%M %p")
+        }
+        await update.message.reply_text("✅ Membership activated successfully!")
+    else: 
+        await update.message.reply_text("❌ Invalid or Expired code!")
 
-async def info(update, context):
-    msg = "📜 **Commands:**\n/savebatch [L1] [L2] [NAME]\n/addcode [CODE] [DAYS] [USES]\n/redeem [CODE]\n/stats\n/broadcast [MSG]\n/cancel_membership [ID]\n/ban [ID]"
-    await update.message.reply_text(msg)
+async def stats(update, context):
+    if update.message.from_user.id != ADMIN_ID: return
+    now = datetime.datetime.now(IST)
+    active_list = []
+    
+    for uid, d in user_membership.items():
+        if now < d['expiry']:
+            rem = d['expiry'] - now
+            uname = d.get('username', 'No Username')
+            active_list.append(
+                f"👤 Name: {d['name']} | {uname}\n"
+                f"🆔 User ID: {uid}\n"
+                f"🎫 Code Used: {d.get('code', 'N/A')}\n"
+                f"📅 Joined: {d.get('join_date', 'N/A')}\n"
+                f"⏳ Expiry: {d['expiry'].strftime('%Y-%m-%d %I:%M %p')}\n"
+                f"⌛ Time Left: {rem.days} Days, {rem.seconds//3600} Hours\n"
+                f"------------------------"
+            )
+    
+    msg = (f"📊 **STATISTICS**\n"
+           f"👥 Total Users: {len(all_users)}\n"
+           f"✅ Active Members: {len(active_list)}\n"
+           f"🚫 Banned Users: {len(banned_users)}\n\n"
+           f"📋 **Detailed Active Members:**\n\n" + "\n".join(active_list))
+    
+    if len(msg) > 4000:
+        for x in range(0, len(msg), 4000):
+            await update.message.reply_text(msg[x:x+4000])
+    else:
+        await update.message.reply_text(msg)
 
-# --- APP SETUP ---
+async def broadcast(update, context):
+    if update.message.from_user.id != ADMIN_ID: return
+    if not context.args:
+        await update.message.reply_text("❌ Please provide a message: /broadcast [MESSAGE]")
+        return
+        
+    msg = " ".join(context.args)
+    sent = 0
+    blocked = 0
+    
+    await update.message.reply_text("⏳ Broadcast started... please wait.")
+    for u in all_users:
+        try: 
+            await context.bot.send_message(chat_id=u, text=msg)
+            sent += 1
+        except: 
+            blocked += 1
+            
+    await update.message.reply_text(f"✅ **Broadcast Report:**\n📨 Successfully Sent: {sent}\n🚫 Blocked by users: {blocked}")
+
+async def save_file(update, context):
+    if update.message.from_user.id != ADMIN_ID: return
+    key = f"file_{update.message.message_id}"
+    caption = update.message.caption if update.message.caption else ""
+    
+    files_db[key] = [{'chat_id': update.effective_chat.id, 'message_id': update.message.message_id, 'caption': caption}]
+    await update.message.reply_text(f"✅ Single File Saved!\n🔗 Link: https://t.me/{BOT_USERNAME}?start={key}")
+
+async def save_batch(update, context):
+    if update.message.from_user.id != ADMIN_ID: return
+    try:
+        first_link = context.args[0]
+        c = int("-100" + first_link.split('/')[4])
+        s = int(first_link.split('/')[5])
+        e = int(context.args[1].split('/')[-1])
+        name = context.args[2]
+        
+        files_db[name] = [{'chat_id': c, 'message_id': i} for i in range(s, e + 1)]
+        await update.message.reply_text(f"✅ Batch Saved Successfully!\n🔗 Link: https://t.me/{BOT_USERNAME}?start={name}")
+    except Exception as e: 
+        await update.message.reply_text(f"❌ Error! Correct format: /savebatch [LINK1] [LINK2] [NAME]")
+
+async def cancel_membership(update, context):
+    if update.message.from_user.id != ADMIN_ID: return
+    try:
+        uid = int(context.args[0])
+        if uid in user_membership: 
+            del user_membership[uid]
+            await update.message.reply_text(f"✅ User ID {uid} membership cancelled.")
+        else: 
+            await update.message.reply_text("❌ This user is not an active member.")
+    except:
+        await update.message.reply_text("❌ Format: /cancel [USER_ID]")
+
+async def ban(update, context):
+    if update.message.from_user.id != ADMIN_ID: return
+    try:
+        banned_users.add(int(context.args[0]))
+        await update.message.reply_text("🚫 User Banned.")
+    except:
+        pass
+
+async def export_data(update, context):
+    if update.message.from_user.id != ADMIN_ID: return
+    data_str = str(files_db)
+    if len(data_str) > 4000:
+        for i in range(0, len(data_str), 4000):
+            await update.message.reply_text(data_str[i:i+4000])
+    else:
+        await update.message.reply_text(f"📂 **Backup Data:**\n\n`{data_str}`", parse_mode='Markdown')
+
+async def import_data(update, context):
+    if update.message.from_user.id != ADMIN_ID: return
+    try:
+        global files_db
+        files_db = eval(" ".join(context.args))
+        await update.message.reply_text("✅ Data imported successfully!")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error importing data: {str(e)}")
+
+# --- 5. APP SETUP & HANDLERS ---
 app = ApplicationBuilder().token(TOKEN).build()
+
 app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("savebatch", save_batch))
-app.add_handler(CommandHandler("redeem", redeem))
-app.add_handler(CommandHandler("addcode", addcode))
-app.add_handler(CommandHandler("stats", stats))
 app.add_handler(CommandHandler("info", info))
-app.add_handler(CommandHandler("cancel_membership", cancel_membership))
+app.add_handler(CommandHandler("addcode", addcode))
+app.add_handler(CommandHandler("redeem", redeem))
+app.add_handler(CommandHandler("stats", stats))
 app.add_handler(CommandHandler("broadcast", broadcast))
+app.add_handler(CommandHandler("savebatch", save_batch))
+app.add_handler(CommandHandler("cancel", cancel_membership))
 app.add_handler(CommandHandler("ban", ban))
+app.add_handler(CommandHandler("export", export_data))
+app.add_handler(CommandHandler("import", import_data))
+
 app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.ALL, save_file))
 
-print("Master Bot is Running!")
+print("Master Bot is Running perfectly without errors!")
 app.run_polling()
