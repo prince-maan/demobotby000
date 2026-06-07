@@ -26,7 +26,7 @@ IST = pytz.timezone('Asia/Kolkata')
 TIERS = {'lite': 1, 'premium': 2, 'ultra': 3}
 
 # --- 3. MONGODB DATABASE ---
-MONGO_URI = "mongodb+srv://walter1122op_db_user:7b9QH8JrydXngsHi@cluster0.h4nwnyq.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+MONGO_URI = "mongodb+srv://walter1122op_db_user:7b9QH8JrydXngsHi@cluster0.h4nwnyc.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
 client = pymongo.MongoClient(MONGO_URI)
 db = client["TelegramBotDB"]
 
