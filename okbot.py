@@ -5,7 +5,6 @@ import pytz
 import os
 import random
 import string
-import io
 import pymongo
 from flask import Flask
 from threading import Thread
@@ -37,7 +36,7 @@ CODE_COLLECTION = db["Prince_Codes"]
 # CONVERSATION STATES
 (WAIT_REDEEM_CODE, WAIT_CODE_DAYS, WAIT_CODE_USES, 
  WAIT_FIRST_LINK, WAIT_LAST_LINK, WAIT_BATCH_NAME, 
- WAIT_BROADCAST_MSG, WAIT_USER_ID, WAIT_IMPORT_DATA) = range(9)
+ WAIT_BROADCAST_MSG, WAIT_USER_ID) = range(8)
 
 # --- 4. MAIN USER FUNCTIONS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -62,7 +61,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 has_active_plan = True
             
             if user.id in ADMIN_IDS: 
-                user_tier = 'ultra'
+                user_tier = 'ultra' 
                 has_active_plan = True
                 
             file_tier = f_doc['tier']
@@ -77,7 +76,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text("❌ **Error sending file.** / फाइल भेजने में समस्या हुई।")
             else:
                 keyboard = [[InlineKeyboardButton("💎 Upgrade Membership", url=BUY_LINK)]]
-                await update.message.reply_text(f"🛑 **Access Denied!**\nThis is a **{file_tier.upper()}** file, but your plan is **{user_tier.upper()}**.", reply_markup=InlineKeyboardMarkup(keyboard))
+                await update.message.reply_text(
+                    f"🛑 **Access Denied!**\n\n"
+                    f"This is a **{file_tier.upper()}** file, but your current plan is **{user_tier.upper()}**.\n"
+                    f"Please upgrade your membership to view it.\n\n"
+                    f"यह एक **{file_tier.upper()}** फाइल है, लेकिन आपका वर्तमान प्लान **{user_tier.upper()}** है।\n"
+                    f"इसे देखने के लिए कृपया अपनी मेंबरशिप अपग्रेड करें।", 
+                    reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown'
+                )
         else: 
             await update.message.reply_text("❌ **File not found.**\nफाइल नहीं मिली।")
     else: 
@@ -86,12 +92,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             status, tier_msg = "Active 🟢", u_doc.get('tier', 'lite').upper()
             
         keyboard = [[InlineKeyboardButton("💰 Buy Membership", url=BUY_LINK)], [InlineKeyboardButton("🎫 Redeem Code", callback_data="redeem_start")]]
-        await update.message.reply_text(f"👋 **Welcome {user.first_name}!**\n👤 **Status:** {status}\n👑 **Current Plan:** {tier_msg}", reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.message.reply_text(
+            f"👋 **Welcome {user.first_name}!**\n\n"
+            f"👤 **Status:** {status}\n"
+            f"👑 **Current Plan:** {tier_msg}\n\n"
+            f"🎬 To watch premium videos, please buy a membership or redeem your code.\n"
+            f"प्रीमियम वीडियो देखने के लिए कृपया मेंबरशिप खरीदें या अपना प्रोमो कोड रिडीम करें।", 
+            reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown'
+        )
 
 # --- 5. REDEEM SYSTEM ---
 async def redeem_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    await update.callback_query.message.reply_text("✍️ **Please type and send your promo code:**\n(Send /cancel to abort)")
+    await update.callback_query.message.reply_text("✍️ **Please type and send your promo code:**\nकृपया अपना प्रोमो कोड टाइप करके भेजें:\n\n(Send /cancel to abort | कैंसिल करने के लिए /cancel दबाएं)")
     return WAIT_REDEEM_CODE
 
 async def process_redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -106,11 +119,11 @@ async def process_redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         now = datetime.datetime.now(IST)
         expiry_str = (now + datetime.timedelta(days=days)).isoformat()
-        USER_COLLECTION.update_one({"_id": user.id}, {"$set": {'tier': tier, 'code': code, 'expiry': expiry_str, 'join_date': now.strftime("%Y-%m-%d %I:%M %p")}})
         
-        await update.message.reply_text(f"🎉 **Congratulations!**\nYour **{tier.upper()}** plan activated! (Validity: {days} Days)")
+        USER_COLLECTION.update_one({"_id": user.id}, {"$set": {'name': user.first_name, 'username': user.username, 'tier': tier, 'code': code, 'expiry': expiry_str, 'join_date': now.strftime("%Y-%m-%d %I:%M %p")}}, upsert=True)
+        await update.message.reply_text(f"🎉 **Congratulations! / बधाई हो!**\n\nYour **{tier.upper()}** plan has been successfully activated! (Validity: {days} Days)\n\nआपका **{tier.upper()}** प्लान सफलतापूर्वक एक्टिवेट हो गया है! (वैलिडिटी: {days} दिन)")
     else: 
-        await update.message.reply_text("❌ **Invalid or Expired code.**")
+        await update.message.reply_text("❌ **Invalid or Expired code.**\nकोड गलत है या एक्सपायर हो चुका है।")
     return ConversationHandler.END
 
 # --- 6. ADMIN DASHBOARD & STATS ---
@@ -118,35 +131,34 @@ def get_admin_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ Add Code", callback_data="addcode_start"), InlineKeyboardButton("📊 Stats", callback_data="admin_stats")],
         [InlineKeyboardButton("📁 Add Batch", callback_data="batch_start"), InlineKeyboardButton("📢 Broadcast", callback_data="broadcast_start")],
-        [InlineKeyboardButton("🚫 Ban/Unban", callback_data="ban_menu"), InlineKeyboardButton("❌ Cancel Plan", callback_data="action_cancel")],
-        [InlineKeyboardButton("📤 Export (File)", callback_data="admin_export"), InlineKeyboardButton("📥 Import", callback_data="import_start")]
+        [InlineKeyboardButton("🚫 Ban/Unban", callback_data="ban_menu"), InlineKeyboardButton("❌ Cancel Plan", callback_data="action_cancel")]
     ])
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id not in ADMIN_IDS: return
-    await update.message.reply_text("👨‍💻 **Super Admin Dashboard**", reply_markup=get_admin_keyboard())
+    await update.message.reply_text("👨‍💻 **Super Admin Dashboard**\nक्या करना चाहते हैं?", reply_markup=get_admin_keyboard())
 
 async def back_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query.from_user.id not in ADMIN_IDS: return
     await update.callback_query.answer()
-    await update.callback_query.message.edit_text("👨‍💻 **Super Admin Dashboard**", reply_markup=get_admin_keyboard())
+    await update.callback_query.message.edit_text("👨‍💻 **Super Admin Dashboard**\nक्या करना चाहते हैं?", reply_markup=get_admin_keyboard())
 
 async def ban_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query.from_user.id not in ADMIN_IDS: return
     await update.callback_query.answer()
-    keyboard = [[InlineKeyboardButton("🚫 Ban", callback_data="action_ban")], [InlineKeyboardButton("✅ Unban", callback_data="action_unban")], [InlineKeyboardButton("🔙 Back", callback_data="back_to_admin")]]
-    await update.callback_query.message.edit_text("🚫 **Ban / Unban System**", reply_markup=InlineKeyboardMarkup(keyboard))
+    keyboard = [[InlineKeyboardButton("🚫 Ban User", callback_data="action_ban")], [InlineKeyboardButton("✅ Unban User", callback_data="action_unban")], [InlineKeyboardButton("🔙 Back to Dashboard", callback_data="back_to_admin")]]
+    await update.callback_query.message.edit_text("🚫 **Ban / Unban System**\n\nआप क्या करना चाहते हैं?", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query.from_user.id not in ADMIN_IDS: return
     await update.callback_query.answer()
     t_users = USER_COLLECTION.count_documents({})
-    banned = USER_COLLECTION.count_documents({"is_banned": True})
     blocked = USER_COLLECTION.count_documents({"is_blocked": True})
+    banned = USER_COLLECTION.count_documents({"is_banned": True})
     
-    msg = f"📊 **BOT STATISTICS**\n🤖 Started: {t_users}\n🚫 Blocked: {blocked}\n⛔ Banned: {banned}\n\n👇 **View Members List:**"
-    keyboard = [[InlineKeyboardButton("🥉 Lite", callback_data="tierstats_lite")], [InlineKeyboardButton("🥈 Premium", callback_data="tierstats_premium")], [InlineKeyboardButton("🥇 Ultra", callback_data="tierstats_ultra")], [InlineKeyboardButton("🔙 Back", callback_data="back_to_admin")]]
-    await update.callback_query.message.edit_text(msg, reply_markup=InlineKeyboardMarkup(keyboard))
+    msg = (f"📊 **BOT STATISTICS**\n\n🤖 **बॉट स्टार्ट किया:** {t_users} लोगों ने\n🚫 **बॉट को ब्लॉक किया:** {blocked} लोगों ने\n⛔ **बैन किए गए यूज़र्स:** {banned} लोगों ने\n*(नोट: ब्लॉक गिनती ब्रॉडकास्ट के समय अपडेट होती है)*\n\n👇 **किस प्लान के मेंबर्स की लिस्ट देखनी है?**")
+    keyboard = [[InlineKeyboardButton("🥉 Lite", callback_data="tierstats_lite"), InlineKeyboardButton("🥈 Premium", callback_data="tierstats_premium")], [InlineKeyboardButton("🥇 Ultra", callback_data="tierstats_ultra"), InlineKeyboardButton("🔙 Back", callback_data="back_to_admin")]]
+    await update.callback_query.message.edit_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
 async def show_tier_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query.from_user.id not in ADMIN_IDS: return
@@ -155,88 +167,102 @@ async def show_tier_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now = datetime.datetime.now(IST)
     tier_list = []
     
-    users = USER_COLLECTION.find({"tier": tier_req})
-    for d in users:
+    for d in USER_COLLECTION.find({"tier": tier_req}):
         if d.get("expiry") and datetime.datetime.fromisoformat(d["expiry"]) > now:
             rem = datetime.datetime.fromisoformat(d["expiry"]) - now
-            tier_list.append(f"👤 **{d.get('name')}** (`{d['_id']}`)\n⏳ Left: {rem.days} Days")
+            uname = f"@{d.get('username')}" if d.get('username') else "N/A"
+            tier_list.append(f"👤 **{d.get('name')}** ({uname} | ID: `{d['_id']}`)\n🎫 **Code:** `{d.get('code', 'N/A')}` | 📅 **Joined:** {d.get('join_date', 'N/A')}\n⏳ **Left:** {rem.days} Days, {rem.seconds//3600} Hours\n━━━━━━━━━━━━━━━")
             
-    msg = f"👥 **Total {tier_req.upper()}:** {len(tier_list)}\n\n" + "\n".join(tier_list[:50]) # max 50 for display
-    await update.callback_query.message.edit_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="admin_stats")]]))
+    emojis = {'lite': '🥉', 'premium': '🥈', 'ultra': '🥇'}
+    msg = f"{emojis[tier_req]} **{tier_req.upper()} MEMBERS**\n\n👥 **Total {tier_req.upper()} Users:** {len(tier_list)}\n\n"
+    if tier_list: msg += "\n".join(tier_list)
+    else: msg += f"🔹 अभी कोई {tier_req.upper()} मेंबर नहीं है।"
+        
+    keyboard = [[InlineKeyboardButton("🔙 Back to Stats", callback_data="admin_stats")]]
+    if len(msg) > 4000:
+        await update.callback_query.message.delete()
+        for x in range(0, len(msg), 4000):
+            if x + 4000 >= len(msg): await context.bot.send_message(chat_id=update.effective_chat.id, text=msg[x:x+4000], parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+            else: await context.bot.send_message(chat_id=update.effective_chat.id, text=msg[x:x+4000], parse_mode='Markdown')
+    else: await update.callback_query.message.edit_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
 # --- 7. ADD CODE SYSTEM ---
 async def addcode_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query.from_user.id not in ADMIN_IDS: return
     await update.callback_query.answer()
     keyboard = [[InlineKeyboardButton("🥉 Lite", callback_data="set_tier_lite")], [InlineKeyboardButton("🥈 Premium", callback_data="set_tier_premium")], [InlineKeyboardButton("🥇 Ultra", callback_data="set_tier_ultra")]]
-    await update.callback_query.message.reply_text("1️⃣ **Select Tier:**", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.callback_query.message.reply_text("1️⃣ **प्लान (Tier) चुनें:**", reply_markup=InlineKeyboardMarkup(keyboard))
     return WAIT_CODE_DAYS
 
 async def set_code_tier(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     context.user_data['new_code_tier'] = update.callback_query.data.split('_')[2] 
-    await update.callback_query.message.reply_text("2️⃣ **How many days?** (Number only):")
+    await update.callback_query.message.reply_text(f"✅ प्लान **{context.user_data['new_code_tier'].upper()}** चुना गया।\n\n2️⃣ **कितने दिनों के लिए?** (केवल अंक):")
     return WAIT_CODE_DAYS 
 
 async def set_code_days(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['new_code_days'] = int(update.message.text)
-    await update.message.reply_text("3️⃣ **How many uses?** (e.g. 50)")
+    await update.message.reply_text("3️⃣ **कितने लोग इसे यूज़ कर सकते हैं?** (जैसे: 50)")
     return WAIT_CODE_USES
 
 async def set_code_uses(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uses, tier, days = int(update.message.text), context.user_data['new_code_tier'], context.user_data['new_code_days']
     code = f"{tier[:3].upper()}-" + ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
     CODE_COLLECTION.update_one({"_id": code}, {"$set": {'tier': tier, 'days': days, 'uses_left': uses}}, upsert=True)
-    await update.message.reply_text(f"✅ **Code Generated!**\n🎫 `{code}`\n👑 {tier.upper()} | ⏳ {days} Days | 👥 {uses} Uses", parse_mode='Markdown')
+    await update.message.reply_text(f"✅ **नया कोड तैयार!**\n🎫 `{code}`\n👑 {tier.upper()} | ⏳ {days} Days | 👥 {uses} Uses", parse_mode='Markdown')
     return ConversationHandler.END
 
-# --- 8. BATCH SYSTEM ---
+# --- 8. SMART BATCH UPLOAD SYSTEM ---
 async def batch_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query.from_user.id not in ADMIN_IDS: return
     await update.callback_query.answer()
-    await update.callback_query.message.reply_text("🔗 First file link:")
+    await update.callback_query.message.reply_text("🔗 **Step 1:** कृपया पहली फाइल का लिंक (First Link) भेजें:")
     return WAIT_FIRST_LINK
 
 async def batch_first_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['first_link'] = update.message.text
-    await update.message.reply_text("🔗 Last file link:")
+    await update.message.reply_text("🔗 **Step 2:** अब आखिरी फाइल का लिंक (Last Link) भेजें:")
     return WAIT_LAST_LINK
 
 async def batch_last_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['last_link'] = update.message.text
-    await update.message.reply_text("📝 Batch Name (No spaces):")
+    await update.message.reply_text("📝 **Step 3:** इस बैच का एक नाम (Name/ID) दें (बिना स्पेस के):")
     return WAIT_BATCH_NAME
 
 async def batch_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['batch_name'] = update.message.text
     keyboard = [[InlineKeyboardButton("🥉 Lite", callback_data="batchtier_lite")], [InlineKeyboardButton("🥈 Premium", callback_data="batchtier_premium")], [InlineKeyboardButton("🥇 Ultra", callback_data="batchtier_ultra")]]
-    await update.message.reply_text("👑 Target Plan?", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text("👑 **Step 4:** यह बैच किस प्लान के लिए है?", reply_markup=InlineKeyboardMarkup(keyboard))
     return WAIT_BATCH_NAME
 
 async def batch_save_final(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    tier, name = update.callback_query.data.split('_')[1], context.user_data['batch_name']
+    tier = update.callback_query.data.split('_')[1]
+    name = context.user_data['batch_name']
     try:
-        f_link, l_link = context.user_data['first_link'], context.user_data['last_link']
+        f_link = context.user_data['first_link']
+        l_link = context.user_data['last_link']
         c = int("-100" + f_link.split('/')[4])
-        s, e = int(f_link.split('/')[5]), int(l_link.split('/')[-1])
+        s = int(f_link.split('/')[5])
+        e = int(l_link.split('/')[-1])
+        
         messages = [{'chat_id': c, 'msg_id': i} for i in range(s, e + 1)]
         FILE_COLLECTION.update_one({"_id": name}, {"$set": {'tier': tier, 'messages': messages}}, upsert=True)
-        await update.callback_query.message.edit_text(f"✅ **Batch Saved!**\n🔗 Link: https://t.me/{BOT_USERNAME}?start={name}")
+        await update.callback_query.message.edit_text(f"✅ **बैच ({tier.upper()}) सेव हो गया!**\n🔗 लिंक: https://t.me/{BOT_USERNAME}?start={name}")
     except Exception:
-        await update.callback_query.message.edit_text("❌ Error in link.")
+        await update.callback_query.message.edit_text("❌ लिंक में कोई समस्या है। प्रक्रिया रद्द।")
     return ConversationHandler.END
 
-# --- 9. BROADCAST & ACTION ---
+# --- 9. BROADCAST, BAN/UNBAN, CANCEL ---
 async def broadcast_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query.from_user.id not in ADMIN_IDS: return
     await update.callback_query.answer()
-    await update.callback_query.message.reply_text("📢 **Broadcast:** Send message:")
+    await update.callback_query.message.reply_text("📢 **Broadcast:**\nकृपया वह मैसेज/फोटो/वीडियो भेजें जो आप सभी को भेजना चाहते हैं:")
     return WAIT_BROADCAST_MSG
 
 async def process_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sent, blocked = 0, 0
-    await update.message.reply_text("⏳ Sending...")
+    await update.message.reply_text("⏳ भेज रहा हूँ...")
     for u in USER_COLLECTION.find({"is_banned": {"$ne": True}}):
         try: 
             await context.bot.copy_message(chat_id=u['_id'], from_chat_id=update.effective_chat.id, message_id=update.message.message_id)
@@ -245,65 +271,49 @@ async def process_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except: 
             USER_COLLECTION.update_one({"_id": u['_id']}, {"$set": {"is_blocked": True}})
             blocked += 1
-    await update.message.reply_text(f"✅ **Report:**\n📨 Sent: {sent}\n🚫 Blocked: {blocked}")
+            
+    await update.message.reply_text(f"✅ **रिपोर्ट:**\n📨 भेजे गए: {sent}\n🚫 ब्लॉक किए गए: {blocked}")
     return ConversationHandler.END
 
 async def ask_user_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query.from_user.id not in ADMIN_IDS: return
     await update.callback_query.answer()
-    context.user_data['admin_action'] = update.callback_query.data.split('_')[1] 
-    await update.callback_query.message.edit_text(f"🎯 Send User ID:")
+    action = update.callback_query.data.split('_')[1] 
+    context.user_data['admin_action'] = action
+    
+    if action == "cancel": action_text = "कैंसिल"
+    elif action == "ban": action_text = "बैन"
+    elif action == "unban": action_text = "अनबैन"
+    
+    await update.callback_query.message.edit_text(f"🎯 **{action_text.upper()} USER**\n\nकृपया उस यूज़र की **टेलीग्राम ID** भेजें जिसे आप {action_text} करना चाहते हैं:\n\n(रद्द करने के लिए /cancel लिखें)")
     return WAIT_USER_ID
 
 async def process_user_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    action, uid = context.user_data['admin_action'], int(update.message.text.strip())
+    input_text = update.message.text.strip()
+    action = context.user_data['admin_action']
+    try: uid = int(input_text)
+    except: 
+        await update.message.reply_text("❌ गलत इनपुट! कृपया सही ID भेजें।")
+        return ConversationHandler.END
+        
     if action == 'ban':
         USER_COLLECTION.update_one({"_id": uid}, {"$set": {"is_banned": True}})
-        await update.message.reply_text(f"🚫 User {uid} banned.")
+        await update.message.reply_text(f"🚫 यूज़र (ID: `{uid}`) को बैन कर दिया गया है।", parse_mode='Markdown')
     elif action == 'unban':
         USER_COLLECTION.update_one({"_id": uid}, {"$set": {"is_banned": False}})
-        await update.message.reply_text(f"✅ User {uid} unbanned.")
+        await update.message.reply_text(f"✅ यूज़र (ID: `{uid}`) को अनबैन कर दिया गया है। अब वे बॉट का इस्तेमाल कर सकते हैं।", parse_mode='Markdown')
     elif action == 'cancel':
         USER_COLLECTION.update_one({"_id": uid}, {"$unset": {"expiry": "", "tier": ""}})
-        await update.message.reply_text(f"❌ User {uid} plan cancelled.")
-    return ConversationHandler.END
-
-# --- 10. IMPORT/EXPORT ---
-async def admin_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.callback_query.from_user.id not in ADMIN_IDS: return
-    await update.callback_query.answer()
-    backup_dict = {f["_id"]: {"tier": f.get("tier"), "messages": f.get("messages")} for f in FILE_COLLECTION.find({})}
-    bio = io.BytesIO(str(backup_dict).encode('utf-8'))
-    bio.name = 'database_backup.txt'
-    await context.bot.send_document(chat_id=update.effective_chat.id, document=bio, caption="📂 **Database Backup (MongoDB)**")
-
-async def import_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.callback_query.from_user.id not in ADMIN_IDS: return
-    await update.callback_query.answer()
-    await update.callback_query.message.reply_text("📥 Send your backup `.txt` file:")
-    return WAIT_IMPORT_DATA
-
-async def process_import(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        f = io.BytesIO()
-        await (await context.bot.get_file(update.message.document.file_id)).download_to_memory(out=f)
-        data_str = f.getvalue().decode('utf-8')
-        imported_data = eval(data_str[data_str.find('{'):data_str.rfind('}')+1])
-        
-        for key, value in imported_data.items():
-            tier = 'lite' if isinstance(value, list) else value.get('tier', 'lite')
-            msgs = value if isinstance(value, list) else value.get('messages', [])
-            FILE_COLLECTION.update_one({"_id": key}, {"$set": {'tier': tier, 'messages': msgs}}, upsert=True)
+        await update.message.reply_text(f"❌ यूज़र (ID: `{uid}`) का प्रीमियम प्लान कैंसिल कर दिया गया है।", parse_mode='Markdown')
             
-        await update.message.reply_text("✅ **Data imported to Cloud DB!**")
-    except Exception as e: await update.message.reply_text(f"❌ Error: {e}")
     return ConversationHandler.END
 
+# --- 10. SINGLE FILE HANDLER ---
 async def catch_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id not in ADMIN_IDS: return
     msg_id = update.message.message_id
-    keyboard = [[InlineKeyboardButton("🥉 Lite File", callback_data=f"savefile_lite_{msg_id}")], [InlineKeyboardButton("🥇 Ultra File", callback_data=f"savefile_ultra_{msg_id}")]]
-    await update.message.reply_text("📁 Select Plan:", reply_markup=InlineKeyboardMarkup(keyboard))
+    keyboard = [[InlineKeyboardButton("🥉 Lite File", callback_data=f"savefile_lite_{msg_id}")], [InlineKeyboardButton("🥈 Premium File", callback_data=f"savefile_premium_{msg_id}")], [InlineKeyboardButton("🥇 Ultra File", callback_data=f"savefile_ultra_{msg_id}")]]
+    await update.message.reply_text("📁 यह फाइल किस प्लान के लिए है?", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def save_file_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query.from_user.id not in ADMIN_IDS: return
@@ -311,14 +321,15 @@ async def save_file_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     d = update.callback_query.data.split('_')
     key = f"file_{d[2]}"
     FILE_COLLECTION.update_one({"_id": key}, {"$set": {'tier': d[1], 'messages': [{'chat_id': update.effective_chat.id, 'msg_id': int(d[2])}]}}, upsert=True)
-    await update.callback_query.message.edit_text(f"✅ File Saved!\n🔗 https://t.me/{BOT_USERNAME}?start={key}")
+    await update.callback_query.message.edit_text(f"✅ फाइल **{d[1].upper()}** के लिए सेव!\n🔗 लिंक: https://t.me/{BOT_USERNAME}?start={key}")
 
 async def cancel_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ **Process cancelled.**")
+    await update.message.reply_text("❌ **Process cancelled.** / प्रक्रिया रद्द कर दी गई है।")
     return ConversationHandler.END
 
 # --- APP SETUP ---
 app = ApplicationBuilder().token(TOKEN).build()
+
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("admin", admin_panel))
 app.add_handler(ConversationHandler(entry_points=[CallbackQueryHandler(redeem_start, pattern='^redeem_start$')], states={WAIT_REDEEM_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_redeem)]}, fallbacks=[CommandHandler('cancel', cancel_conv)]))
@@ -326,14 +337,13 @@ app.add_handler(ConversationHandler(entry_points=[CallbackQueryHandler(addcode_s
 app.add_handler(ConversationHandler(entry_points=[CallbackQueryHandler(batch_start, pattern='^batch_start$')], states={WAIT_FIRST_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, batch_first_link)], WAIT_LAST_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, batch_last_link)], WAIT_BATCH_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, batch_name), CallbackQueryHandler(batch_save_final, pattern='^batchtier_')]}, fallbacks=[CommandHandler('cancel', cancel_conv)]))
 app.add_handler(ConversationHandler(entry_points=[CallbackQueryHandler(broadcast_start, pattern='^broadcast_start$')], states={WAIT_BROADCAST_MSG: [MessageHandler(filters.ALL & ~filters.COMMAND, process_broadcast)]}, fallbacks=[CommandHandler('cancel', cancel_conv)]))
 app.add_handler(ConversationHandler(entry_points=[CallbackQueryHandler(ask_user_id, pattern='^action_')], states={WAIT_USER_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_user_action)]}, fallbacks=[CommandHandler('cancel', cancel_conv)]))
-app.add_handler(ConversationHandler(entry_points=[CallbackQueryHandler(import_start, pattern='^import_start$')], states={WAIT_IMPORT_DATA: [MessageHandler(filters.Document.ALL & ~filters.COMMAND, process_import)]}, fallbacks=[CommandHandler('cancel', cancel_conv)]))
+
 app.add_handler(CallbackQueryHandler(ban_menu, pattern='^ban_menu$'))
 app.add_handler(CallbackQueryHandler(admin_stats, pattern='^admin_stats$'))
 app.add_handler(CallbackQueryHandler(show_tier_stats, pattern='^tierstats_'))
 app.add_handler(CallbackQueryHandler(back_to_admin, pattern='^back_to_admin$'))
-app.add_handler(CallbackQueryHandler(admin_export, pattern='^admin_export$'))
 app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.ALL, catch_file))
 app.add_handler(CallbackQueryHandler(save_file_callback, pattern='^savefile_'))
 
-print("Prince Cloud Bot Started! 🔥")
+print("Prince Bot Started! 🔥")
 app.run_polling()
