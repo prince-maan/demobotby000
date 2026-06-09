@@ -17,13 +17,12 @@ def run_flask(): app_flask.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8
 Thread(target=run_flask).start()
 
 # --- 2. SETTINGS (PRINCE) ---
-# Purani line ko hata kar ye likho:
 TOKEN = os.environ.get("BOT_TOKEN")
-ADMIN_IDS = [8820964089, 8895101534] 
+ADMIN_IDS = [8820964089, 8895101534]
 BOT_USERNAME = "smallPinkVide00s_bot" 
 BUY_LINK = "https://t.me/SaulGoodmanOp"
 # 👇 यहाँ अपने प्राइवेट मास्टर चैनल की ID डालें (-100 से शुरू होनी चाहिए)
-DB_CHANNEL_ID = -1003846345760 
+DB_CHANNEL_ID = -1000000000000 
 
 IST = pytz.timezone('Asia/Kolkata')
 TIERS = {'lite': 1, 'premium': 2, 'ultra': 3}
@@ -71,10 +70,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 messages = f_doc['messages']
                 source_chat = messages[0]['chat_id']
                 msg_ids = [m['msg_id'] for m in messages]
-                try:
-                    await context.bot.copy_messages(chat_id=user.id, from_chat_id=source_chat, message_ids=msg_ids, protect_content=True)
-                except Exception:
-                    await update.message.reply_text("❌ **Error sending file.** / फाइल भेजने में समस्या हुई। (Check bot is admin in DB Channel)")
+                
+                # Fixed Singular Loop (No Crash)
+                success = 0
+                err_msg = ""
+                for m_id in msg_ids:
+                    try:
+                        await context.bot.copy_message(chat_id=user.id, from_chat_id=source_chat, message_id=m_id, protect_content=True)
+                        success += 1
+                    except Exception as e:
+                        err_msg = str(e)
+                
+                if success == 0:
+                    await update.message.reply_text(f"❌ **Error sending file.**\nChannel ID या Admin राइट्स चेक करें।\nReason: {err_msg}")
             else:
                 keyboard = [[InlineKeyboardButton("💎 Upgrade Membership", url=BUY_LINK)]]
                 await update.message.reply_text(f"🛑 **Access Denied!**\n\nThis is a **{file_tier.upper()}** file, but your current plan is **{user_tier.upper()}**.\nइसे देखने के लिए कृपया अपनी मेंबरशिप अपग्रेड करें।", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
@@ -290,7 +298,6 @@ async def catch_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id not in ADMIN_IDS: return
     
     try:
-        # चुपचाप फाइल को Master Channel में फॉरवर्ड करना
         copied_msg = await context.bot.copy_message(
             chat_id=DB_CHANNEL_ID,
             from_chat_id=update.effective_chat.id,
@@ -301,7 +308,6 @@ async def catch_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ **Error:**\nक्या आपने बॉट को मास्टर चैनल में Admin बनाया है और DB_CHANNEL_ID सही डाली है?\nError: {e}")
         return
 
-    # तीनों बटन एकदम लाइन से
     keyboard = [
         [InlineKeyboardButton("🥉 Lite File", callback_data=f"savefile_lite_{ch_msg_id}")],
         [InlineKeyboardButton("🥈 Premium File", callback_data=f"savefile_premium_{ch_msg_id}")],
@@ -312,12 +318,11 @@ async def catch_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def save_file_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query.from_user.id not in ADMIN_IDS: return
     await update.callback_query.answer()
-    d = update.callback_query.data.split('_') # ['savefile', 'tier', 'msgid']
+    d = update.callback_query.data.split('_') 
     tier = d[1]
     msg_id = int(d[2])
     key = f"file_{msg_id}"
     
-    # फाइल को DB_CHANNEL_ID के साथ सेव करना
     FILE_COLLECTION.update_one({"_id": key}, {"$set": {'tier': tier, 'messages': [{'chat_id': DB_CHANNEL_ID, 'msg_id': msg_id}]}}, upsert=True)
     await update.callback_query.message.edit_text(f"✅ फाइल **{tier.upper()}** के लिए सेव!\n🔗 लिंक: https://t.me/{BOT_USERNAME}?start={key}")
 
@@ -339,10 +344,8 @@ app.add_handler(CallbackQueryHandler(ban_menu, pattern='^ban_menu$'))
 app.add_handler(CallbackQueryHandler(admin_stats, pattern='^admin_stats$'))
 app.add_handler(CallbackQueryHandler(show_tier_stats, pattern='^tierstats_'))
 app.add_handler(CallbackQueryHandler(back_to_admin, pattern='^back_to_admin$'))
-# Catch ALL media types
 app.add_handler(MessageHandler(filters.Document.ALL | filters.VIDEO | filters.PHOTO | filters.AUDIO | filters.ANIMATION, catch_file))
 app.add_handler(CallbackQueryHandler(save_file_callback, pattern='^savefile_'))
 
 print("Prince Bot Started! 🔥")
-# Drop pending updates ensures no conflict errors on restart
 app.run_polling(drop_pending_updates=True)
