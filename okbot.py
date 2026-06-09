@@ -22,7 +22,7 @@ ADMIN_IDS = [8820964089, 8895101534]
 BOT_USERNAME = "smallPinkVide00s_bot" 
 BUY_LINK = "https://t.me/SaulGoodmanOp"
 # 👇 यहाँ अपने प्राइवेट मास्टर चैनल की ID डालें (-100 से शुरू होनी चाहिए)
-DB_CHANNEL_ID = -1000000000000 
+DB_CHANNEL_ID = -1003846345760 
 
 IST = pytz.timezone('Asia/Kolkata')
 TIERS = {'lite': 1, 'premium': 2, 'ultra': 3}
