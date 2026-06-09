@@ -19,7 +19,7 @@ Thread(target=run_flask).start()
 # --- 2. SETTINGS (PRINCE) ---
 # Purani line ko hata kar ye likho:
 TOKEN = os.environ.get("BOT_TOKEN")
-ADMIN_IDS = [8820964089] 
+ADMIN_IDS = [8820964089, 8895101534] 
 BOT_USERNAME = "smallPinkVide00s_bot" 
 BUY_LINK = "https://t.me/SaulGoodmanOp"
 # 👇 यहाँ अपने प्राइवेट मास्टर चैनल की ID डालें (-100 से शुरू होनी चाहिए)
