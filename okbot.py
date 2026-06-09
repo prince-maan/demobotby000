@@ -17,7 +17,8 @@ def run_flask(): app_flask.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8
 Thread(target=run_flask).start()
 
 # --- 2. SETTINGS (PRINCE) ---
-TOKEN = '8383623405:AAGTcEByIvGyzBL-Z3RVPgRCCI_AuYPwen0' 
+# Purani line ko hata kar ye likho:
+TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_IDS = [8820964089] 
 BOT_USERNAME = "smallPinkVide00s_bot" 
 BUY_LINK = "https://t.me/SaulGoodmanOp"
