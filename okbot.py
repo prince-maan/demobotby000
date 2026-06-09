@@ -21,6 +21,9 @@ TOKEN = '8383623405:AAGzRLt2ClusHWKBe_5KLVKaZ45vKcRY0Eg'
 ADMIN_IDS = [8820964089] 
 BOT_USERNAME = "smallPinkVide00s_bot" 
 BUY_LINK = "https://t.me/SaulGoodmanOp"
+# 👇 यहाँ अपने प्राइवेट मास्टर चैनल की ID डालें (-100 से शुरू होनी चाहिए)
+DB_CHANNEL_ID = -1003846345760 
+
 IST = pytz.timezone('Asia/Kolkata')
 TIERS = {'lite': 1, 'premium': 2, 'ultra': 3}
 
@@ -33,10 +36,7 @@ USER_COLLECTION = db["Prince_Users"]
 FILE_COLLECTION = db["common_files"]
 CODE_COLLECTION = db["Prince_Codes"]
 
-# CONVERSATION STATES
-(WAIT_REDEEM_CODE, WAIT_CODE_DAYS, WAIT_CODE_USES, 
- WAIT_FIRST_LINK, WAIT_LAST_LINK, WAIT_BATCH_NAME, 
- WAIT_BROADCAST_MSG, WAIT_USER_ID) = range(8)
+(WAIT_REDEEM_CODE, WAIT_CODE_DAYS, WAIT_CODE_USES, WAIT_FIRST_LINK, WAIT_LAST_LINK, WAIT_BATCH_NAME, WAIT_BROADCAST_MSG, WAIT_USER_ID) = range(8)
 
 # --- 4. MAIN USER FUNCTIONS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -73,17 +73,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 try:
                     await context.bot.copy_messages(chat_id=user.id, from_chat_id=source_chat, message_ids=msg_ids, protect_content=True)
                 except Exception:
-                    await update.message.reply_text("❌ **Error sending file.** / फाइल भेजने में समस्या हुई।")
+                    await update.message.reply_text("❌ **Error sending file.** / फाइल भेजने में समस्या हुई। (Check bot is admin in DB Channel)")
             else:
                 keyboard = [[InlineKeyboardButton("💎 Upgrade Membership", url=BUY_LINK)]]
-                await update.message.reply_text(
-                    f"🛑 **Access Denied!**\n\n"
-                    f"This is a **{file_tier.upper()}** file, but your current plan is **{user_tier.upper()}**.\n"
-                    f"Please upgrade your membership to view it.\n\n"
-                    f"यह एक **{file_tier.upper()}** फाइल है, लेकिन आपका वर्तमान प्लान **{user_tier.upper()}** है।\n"
-                    f"इसे देखने के लिए कृपया अपनी मेंबरशिप अपग्रेड करें।", 
-                    reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown'
-                )
+                await update.message.reply_text(f"🛑 **Access Denied!**\n\nThis is a **{file_tier.upper()}** file, but your current plan is **{user_tier.upper()}**.\nइसे देखने के लिए कृपया अपनी मेंबरशिप अपग्रेड करें।", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
         else: 
             await update.message.reply_text("❌ **File not found.**\nफाइल नहीं मिली।")
     else: 
@@ -92,19 +85,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             status, tier_msg = "Active 🟢", u_doc.get('tier', 'lite').upper()
             
         keyboard = [[InlineKeyboardButton("💰 Buy Membership", url=BUY_LINK)], [InlineKeyboardButton("🎫 Redeem Code", callback_data="redeem_start")]]
-        await update.message.reply_text(
-            f"👋 **Welcome {user.first_name}!**\n\n"
-            f"👤 **Status:** {status}\n"
-            f"👑 **Current Plan:** {tier_msg}\n\n"
-            f"🎬 To watch premium videos, please buy a membership or redeem your code.\n"
-            f"प्रीमियम वीडियो देखने के लिए कृपया मेंबरशिप खरीदें या अपना प्रोमो कोड रिडीम करें।", 
-            reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown'
-        )
+        await update.message.reply_text(f"👋 **Welcome {user.first_name}!**\n\n👤 **Status:** {status}\n👑 **Current Plan:** {tier_msg}\n\n🎬 प्रीमियम वीडियो देखने के लिए कृपया मेंबरशिप खरीदें या अपना प्रोमो कोड रिडीम करें।", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
 # --- 5. REDEEM SYSTEM ---
 async def redeem_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    await update.callback_query.message.reply_text("✍️ **Please type and send your promo code:**\nकृपया अपना प्रोमो कोड टाइप करके भेजें:\n\n(Send /cancel to abort | कैंसिल करने के लिए /cancel दबाएं)")
+    await update.callback_query.message.reply_text("✍️ **Please type and send your promo code:**\nकृपया अपना प्रोमो कोड टाइप करके भेजें:\n\n(Send /cancel to abort)")
     return WAIT_REDEEM_CODE
 
 async def process_redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -113,20 +99,18 @@ async def process_redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
     c_doc = CODE_COLLECTION.find_one({"_id": code})
     
     if c_doc and c_doc['uses_left'] > 0:
-        tier = c_doc['tier']
-        days = c_doc['days']
+        tier, days = c_doc['tier'], c_doc['days']
         CODE_COLLECTION.update_one({"_id": code}, {"$inc": {"uses_left": -1}})
-        
         now = datetime.datetime.now(IST)
         expiry_str = (now + datetime.timedelta(days=days)).isoformat()
         
         USER_COLLECTION.update_one({"_id": user.id}, {"$set": {'name': user.first_name, 'username': user.username, 'tier': tier, 'code': code, 'expiry': expiry_str, 'join_date': now.strftime("%Y-%m-%d %I:%M %p")}}, upsert=True)
-        await update.message.reply_text(f"🎉 **Congratulations! / बधाई हो!**\n\nYour **{tier.upper()}** plan has been successfully activated! (Validity: {days} Days)\n\nआपका **{tier.upper()}** प्लान सफलतापूर्वक एक्टिवेट हो गया है! (वैलिडिटी: {days} दिन)")
+        await update.message.reply_text(f"🎉 **Congratulations! / बधाई हो!**\n\nYour **{tier.upper()}** plan has been successfully activated! (Validity: {days} Days)")
     else: 
         await update.message.reply_text("❌ **Invalid or Expired code.**\nकोड गलत है या एक्सपायर हो चुका है।")
     return ConversationHandler.END
 
-# --- 6. ADMIN DASHBOARD & STATS ---
+# --- 6. ADMIN DASHBOARD & FULL STATS ---
 def get_admin_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ Add Code", callback_data="addcode_start"), InlineKeyboardButton("📊 Stats", callback_data="admin_stats")],
@@ -156,7 +140,7 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     blocked = USER_COLLECTION.count_documents({"is_blocked": True})
     banned = USER_COLLECTION.count_documents({"is_banned": True})
     
-    msg = (f"📊 **BOT STATISTICS**\n\n🤖 **बॉट स्टार्ट किया:** {t_users} लोगों ने\n🚫 **बॉट को ब्लॉक किया:** {blocked} लोगों ने\n⛔ **बैन किए गए यूज़र्स:** {banned} लोगों ने\n*(नोट: ब्लॉक गिनती ब्रॉडकास्ट के समय अपडेट होती है)*\n\n👇 **किस प्लान के मेंबर्स की लिस्ट देखनी है?**")
+    msg = (f"📊 **BOT STATISTICS**\n\n🤖 **बॉट स्टार्ट किया:** {t_users} लोगों ने\n🚫 **बॉट को ब्लॉक किया:** {blocked} लोगों ने\n⛔ **बैन किए गए यूज़र्स:** {banned} लोगों ने\n\n👇 **किस प्लान के मेंबर्स की लिस्ट देखनी है?**")
     keyboard = [[InlineKeyboardButton("🥉 Lite", callback_data="tierstats_lite"), InlineKeyboardButton("🥈 Premium", callback_data="tierstats_premium")], [InlineKeyboardButton("🥇 Ultra", callback_data="tierstats_ultra"), InlineKeyboardButton("🔙 Back", callback_data="back_to_admin")]]
     await update.callback_query.message.edit_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
@@ -237,20 +221,19 @@ async def batch_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def batch_save_final(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    tier = update.callback_query.data.split('_')[1]
-    name = context.user_data['batch_name']
+    tier, name = update.callback_query.data.split('_')[1], context.user_data['batch_name']
     try:
-        f_link = context.user_data['first_link']
-        l_link = context.user_data['last_link']
-        c = int("-100" + f_link.split('/')[4])
-        s = int(f_link.split('/')[5])
-        e = int(l_link.split('/')[-1])
+        parts_f = context.user_data['first_link'].split('/')
+        parts_l = context.user_data['last_link'].split('/')
+        
+        c = int("-100" + parts_f[-2]) if 'c' in parts_f else "@" + parts_f[-2]
+        s, e = int(parts_f[-1].split('?')[0]), int(parts_l[-1].split('?')[0])
         
         messages = [{'chat_id': c, 'msg_id': i} for i in range(s, e + 1)]
         FILE_COLLECTION.update_one({"_id": name}, {"$set": {'tier': tier, 'messages': messages}}, upsert=True)
         await update.callback_query.message.edit_text(f"✅ **बैच ({tier.upper()}) सेव हो गया!**\n🔗 लिंक: https://t.me/{BOT_USERNAME}?start={name}")
-    except Exception:
-        await update.callback_query.message.edit_text("❌ लिंक में कोई समस्या है। प्रक्रिया रद्द।")
+    except Exception as e:
+        await update.callback_query.message.edit_text(f"❌ लिंक में कोई समस्या है। एरर: {e}")
     return ConversationHandler.END
 
 # --- 9. BROADCAST, BAN/UNBAN, CANCEL ---
@@ -271,7 +254,6 @@ async def process_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except: 
             USER_COLLECTION.update_one({"_id": u['_id']}, {"$set": {"is_blocked": True}})
             blocked += 1
-            
     await update.message.reply_text(f"✅ **रिपोर्ट:**\n📨 भेजे गए: {sent}\n🚫 ब्लॉक किए गए: {blocked}")
     return ConversationHandler.END
 
@@ -280,17 +262,12 @@ async def ask_user_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     action = update.callback_query.data.split('_')[1] 
     context.user_data['admin_action'] = action
-    
-    if action == "cancel": action_text = "कैंसिल"
-    elif action == "ban": action_text = "बैन"
-    elif action == "unban": action_text = "अनबैन"
-    
+    action_text = {"cancel": "कैंसिल", "ban": "बैन", "unban": "अनबैन"}[action]
     await update.callback_query.message.edit_text(f"🎯 **{action_text.upper()} USER**\n\nकृपया उस यूज़र की **टेलीग्राम ID** भेजें जिसे आप {action_text} करना चाहते हैं:\n\n(रद्द करने के लिए /cancel लिखें)")
     return WAIT_USER_ID
 
 async def process_user_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    input_text = update.message.text.strip()
-    action = context.user_data['admin_action']
+    input_text, action = update.message.text.strip(), context.user_data['admin_action']
     try: uid = int(input_text)
     except: 
         await update.message.reply_text("❌ गलत इनपुट! कृपया सही ID भेजें।")
@@ -301,27 +278,47 @@ async def process_user_action(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(f"🚫 यूज़र (ID: `{uid}`) को बैन कर दिया गया है।", parse_mode='Markdown')
     elif action == 'unban':
         USER_COLLECTION.update_one({"_id": uid}, {"$set": {"is_banned": False}})
-        await update.message.reply_text(f"✅ यूज़र (ID: `{uid}`) को अनबैन कर दिया गया है। अब वे बॉट का इस्तेमाल कर सकते हैं।", parse_mode='Markdown')
+        await update.message.reply_text(f"✅ यूज़र (ID: `{uid}`) को अनबैन कर दिया गया है।", parse_mode='Markdown')
     elif action == 'cancel':
         USER_COLLECTION.update_one({"_id": uid}, {"$unset": {"expiry": "", "tier": ""}})
         await update.message.reply_text(f"❌ यूज़र (ID: `{uid}`) का प्रीमियम प्लान कैंसिल कर दिया गया है।", parse_mode='Markdown')
-            
     return ConversationHandler.END
 
-# --- 10. SINGLE FILE HANDLER ---
+# --- 10. SINGLE FILE HANDLER (AUTO-FORWARD TO DB_CHANNEL) ---
 async def catch_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id not in ADMIN_IDS: return
-    msg_id = update.message.message_id
-    keyboard = [[InlineKeyboardButton("🥉 Lite File", callback_data=f"savefile_lite_{msg_id}")], [InlineKeyboardButton("🥈 Premium File", callback_data=f"savefile_premium_{msg_id}")], [InlineKeyboardButton("🥇 Ultra File", callback_data=f"savefile_ultra_{msg_id}")]]
-    await update.message.reply_text("📁 यह फाइल किस प्लान के लिए है?", reply_markup=InlineKeyboardMarkup(keyboard))
+    
+    try:
+        # चुपचाप फाइल को Master Channel में फॉरवर्ड करना
+        copied_msg = await context.bot.copy_message(
+            chat_id=DB_CHANNEL_ID,
+            from_chat_id=update.effective_chat.id,
+            message_id=update.message.message_id
+        )
+        ch_msg_id = copied_msg.message_id
+    except Exception as e:
+        await update.message.reply_text(f"❌ **Error:**\nक्या आपने बॉट को मास्टर चैनल में Admin बनाया है और DB_CHANNEL_ID सही डाली है?\nError: {e}")
+        return
+
+    # तीनों बटन एकदम लाइन से
+    keyboard = [
+        [InlineKeyboardButton("🥉 Lite File", callback_data=f"savefile_lite_{ch_msg_id}")],
+        [InlineKeyboardButton("🥈 Premium File", callback_data=f"savefile_premium_{ch_msg_id}")],
+        [InlineKeyboardButton("🥇 Ultra File", callback_data=f"savefile_ultra_{ch_msg_id}")]
+    ]
+    await update.message.reply_text("📁 फाइल मास्टर चैनल में बैकअप हो गई है। यह फाइल किस प्लान के लिए है?", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def save_file_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query.from_user.id not in ADMIN_IDS: return
     await update.callback_query.answer()
-    d = update.callback_query.data.split('_')
-    key = f"file_{d[2]}"
-    FILE_COLLECTION.update_one({"_id": key}, {"$set": {'tier': d[1], 'messages': [{'chat_id': update.effective_chat.id, 'msg_id': int(d[2])}]}}, upsert=True)
-    await update.callback_query.message.edit_text(f"✅ फाइल **{d[1].upper()}** के लिए सेव!\n🔗 लिंक: https://t.me/{BOT_USERNAME}?start={key}")
+    d = update.callback_query.data.split('_') # ['savefile', 'tier', 'msgid']
+    tier = d[1]
+    msg_id = int(d[2])
+    key = f"file_{msg_id}"
+    
+    # फाइल को DB_CHANNEL_ID के साथ सेव करना
+    FILE_COLLECTION.update_one({"_id": key}, {"$set": {'tier': tier, 'messages': [{'chat_id': DB_CHANNEL_ID, 'msg_id': msg_id}]}}, upsert=True)
+    await update.callback_query.message.edit_text(f"✅ फाइल **{tier.upper()}** के लिए सेव!\n🔗 लिंक: https://t.me/{BOT_USERNAME}?start={key}")
 
 async def cancel_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ **Process cancelled.** / प्रक्रिया रद्द कर दी गई है।")
@@ -337,13 +334,14 @@ app.add_handler(ConversationHandler(entry_points=[CallbackQueryHandler(addcode_s
 app.add_handler(ConversationHandler(entry_points=[CallbackQueryHandler(batch_start, pattern='^batch_start$')], states={WAIT_FIRST_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, batch_first_link)], WAIT_LAST_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, batch_last_link)], WAIT_BATCH_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, batch_name), CallbackQueryHandler(batch_save_final, pattern='^batchtier_')]}, fallbacks=[CommandHandler('cancel', cancel_conv)]))
 app.add_handler(ConversationHandler(entry_points=[CallbackQueryHandler(broadcast_start, pattern='^broadcast_start$')], states={WAIT_BROADCAST_MSG: [MessageHandler(filters.ALL & ~filters.COMMAND, process_broadcast)]}, fallbacks=[CommandHandler('cancel', cancel_conv)]))
 app.add_handler(ConversationHandler(entry_points=[CallbackQueryHandler(ask_user_id, pattern='^action_')], states={WAIT_USER_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_user_action)]}, fallbacks=[CommandHandler('cancel', cancel_conv)]))
-
 app.add_handler(CallbackQueryHandler(ban_menu, pattern='^ban_menu$'))
 app.add_handler(CallbackQueryHandler(admin_stats, pattern='^admin_stats$'))
 app.add_handler(CallbackQueryHandler(show_tier_stats, pattern='^tierstats_'))
 app.add_handler(CallbackQueryHandler(back_to_admin, pattern='^back_to_admin$'))
-app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.ALL, catch_file))
+# Catch ALL media types
+app.add_handler(MessageHandler(filters.Document.ALL | filters.VIDEO | filters.PHOTO | filters.AUDIO | filters.ANIMATION, catch_file))
 app.add_handler(CallbackQueryHandler(save_file_callback, pattern='^savefile_'))
 
 print("Prince Bot Started! 🔥")
-app.run_polling()
+# Drop pending updates ensures no conflict errors on restart
+app.run_polling(drop_pending_updates=True)
