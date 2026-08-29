@@ -4,15 +4,17 @@ import sqlite3
 import json
 import uuid
 import threading
+import os
 from datetime import datetime
+from flask import Flask
 
 # ==========================================
-# 🛑 यहाँ अपनी डिटेल्स डालें 🛑
+# 🛑 आपकी डिटेल्स 🛑
 # ==========================================
 BOT_TOKEN = "8986044820:AAH_NrdyJ1A0ZCsSwPoQ4PuWdLNWXSUYB3U"
 ADMIN_ID = 8994976810  # आपका Telegram User ID
 PERSONAL_USERNAME = "@princemaan00" # इंटरनेशनल पेमेंट के लिए
-DB_CHANNEL_ID = -1003757631353  # 👈 यहाँ अपने प्राइवेट चैनल की ID डालें 
+DB_CHANNEL_ID = -1003757631353  # आपके प्राइवेट चैनल की ID
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
@@ -249,7 +251,6 @@ def handle_buttons(call):
 
     # --- ADMIN/CHANNEL: Approve Payment (Channel Log) ---
     elif data.startswith("app_"):
-        # यहाँ `split('_', 2)` इस्तेमाल किया गया है ताकि c_1234 ID बीच में से न कटे
         parts = data.split('_', 2)
         user_id = int(parts[1])
         course_id = parts[2]
@@ -260,7 +261,7 @@ def handle_buttons(call):
             try: bot.send_message(user_id, f"🎉 **Payment Approved!**\n\n{res[0]}", parse_mode="Markdown")
             except: pass
             
-            date_now = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
+            date_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             try: 
                 user_info = bot.get_chat(user_id)
                 uname = user_info.username or user_info.first_name
@@ -296,5 +297,21 @@ def handle_buttons(call):
         except: pass
         bot.edit_message_caption(f"❌ **Denied:** {reason}", chat_id=chat_id, message_id=msg_id, parse_mode="Markdown")
 
-print("बोट स्टार्ट हो गया है...")
-bot.infinity_polling()
+# --- Flask Server for Render ---
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Telegram Payment Bot is Running Smoothly!"
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 10000))
+    
+    def run_bot():
+        print("बोट स्टार्ट हो गया है...")
+        bot.infinity_polling(skip_pending=True)
+        
+    t = threading.Thread(target=run_bot)
+    t.start()
+    
+    app.run(host="0.0.0.0", port=port)
