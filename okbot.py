@@ -237,8 +237,8 @@ def expire_qr(chat_id, message_id, course_id):
       bot.delete_message(chat_id, message_id)
       bot.send_message(
           chat_id,
-          "❌ <b>आपका पेमेंट सेशन (10 मिनट) एक्सपायर हो गया है!\nYour payment session (10 minutes) has expired!</b>\nTry again"
-          " Let's get started.",
+          "❌ <b>Your payment session (10 minutes) has expired! Please try again.</b>\n"
+          "<i>(Aapka payment session expire ho gaya hai. Kripya wapas try karein.)</i>",
           parse_mode="HTML",
       )
       del user_states[chat_id]
@@ -269,12 +269,12 @@ def expire_verification(user_id, checking_msg_id, admin_msg_id, course_id):
 
     markup = InlineKeyboardMarkup()
     if CHAT_LINK:
-      markup.row(InlineKeyboardButton("💬 डायरेक्ट संपर्क करें", url=CHAT_LINK))
+      markup.row(InlineKeyboardButton("💬 Contact Directly", url=CHAT_LINK))
     try:
       bot.send_message(
           user_id,
-          "⏳ <b>समय समाप्त!</b>\nएडमिन की तरफ से 5 मिनट में अप्रूवल नहीं मिला है।"
-          " कृपया सीधे चैट पर संपर्क करें:",
+          "⏳ <b>Time's up!</b>\nNo approval received from admin in 5 minutes. Please contact directly via chat:\n\n"
+          "<i>(Time khatam! Admin ki taraf se 5 minute mein approval nahi mila. Kripya direct chat par message karein:)</i>",
           reply_markup=markup,
           parse_mode="HTML",
       )
@@ -313,7 +313,7 @@ def send_course_to_user(chat_id, course):
   # 2. मीडिया फिल्टर करें
   media_items = [it for it in promo_items if it["type"] in ["photo", "video"]]
 
-  # 3. पूरा कैप्शन कलेक्ट करें (फोटो के साथ वाला + अलग से लिखा हुआ)
+  # 3. पूरा कैप्शन कलेक्ट करें
   first_photo_caption = ""
   for it in media_items:
       if it.get("caption"):
@@ -330,7 +330,6 @@ def send_course_to_user(chat_id, course):
   elif custom_caption:
       final_album_caption = custom_caption
 
-  # ⚠️ टेलीग्राम लिमिट (1024 chars) प्रोटेक्शन: अगर कैप्शन बहुत बड़ा है तो उसे सुरक्षित कर दें
   if len(final_album_caption) > 1000:
       final_album_caption = final_album_caption[:1000] + "..."
 
@@ -343,7 +342,6 @@ def send_course_to_user(chat_id, course):
       elif item["type"] == "video":
         bot.send_video(chat_id, item["file_id"], caption=final_album_caption, reply_markup=markup, parse_mode="HTML")
     except:
-      # HTML क्रैश-सेफ फॉलबैक (अगर `<` या `>` जैसे कैरेक्टर हों)
       if item["type"] == "photo":
         bot.send_photo(chat_id, item["file_id"], caption=final_album_caption, reply_markup=markup)
       elif item["type"] == "video":
@@ -355,7 +353,6 @@ def send_course_to_user(chat_id, course):
     media_group_plain = []
     
     for i, item in enumerate(media_items):
-      # फाइनल पूरा कैप्शन सिर्फ पहले फोटो पर जोड़ा जाएगा
       cap = final_album_caption if i == 0 else "" 
       if item["type"] == "photo":
         media_group_html.append(InputMediaPhoto(item["file_id"], caption=cap, parse_mode="HTML"))
@@ -364,24 +361,26 @@ def send_course_to_user(chat_id, course):
         media_group_html.append(InputMediaVideo(item["file_id"], caption=cap, parse_mode="HTML"))
         media_group_plain.append(InputMediaVideo(item["file_id"], caption=cap))
 
-    # पहले सिर्फ एल्बम (फोटो/वीडियो) भेजें
     try: 
       bot.send_media_group(chat_id, media_group_html)
     except: 
-      # क्रैश-सेफ फॉलबैक
       try: bot.send_media_group(chat_id, media_group_plain)
       except Exception as e: print(f"MediaGroup Error: {e}")
 
-    # फिर नीचे अलग से एक टेक्स्ट मैसेज और पेमेंट्स के ऑप्शन्स दें
     try:
       bot.send_message(
           chat_id,
-          f"👆 <b>इस कोर्स (₹{course['amount']}) को खरीदने के लिए विकल्प चुनें:</b>",
+          f"👆 <b>Choose an option to buy this course (₹{course['amount']}):</b>\n"
+          f"<i>(Is course ko kharidne ke liye option chunein:)</i>",
           reply_markup=markup,
           parse_mode="HTML"
       )
     except:
-      bot.send_message(chat_id, f"👆 इस कोर्स (₹{course['amount']}) को खरीदने के लिए विकल्प चुनें:", reply_markup=markup)
+      bot.send_message(
+          chat_id, 
+          f"👆 Choose an option to buy this course (₹{course['amount']}):\n(Is course ko kharidne ke liye option chunein:)", 
+          reply_markup=markup
+      )
 
 
 # ==========================================
@@ -399,7 +398,8 @@ def start_command(message):
     if batch:
       bot.send_message(
           user_id,
-          f"📦 <b>{batch['title']}</b>\nनीचे सभी कोर्सेज दिए गए हैं:",
+          f"📦 <b>{batch['title']}</b>\nAll courses are listed below:\n"
+          f"<i>(Niche sabhi courses diye gaye hain:)</i>",
           parse_mode="HTML",
       )
       course_ids = json.loads(batch["course_ids"])
@@ -408,20 +408,20 @@ def start_command(message):
         if c_data:
           send_course_to_user(user_id, c_data)
     else:
-      bot.send_message(user_id, "❌ यह बैच लिंक एक्सपायर हो गया है।")
+      bot.send_message(user_id, "❌ <b>This batch link has expired.</b>\n<i>(Yeh batch link expire ho gaya hai.)</i>", parse_mode="HTML")
 
   elif param.startswith("c_"):
     course = get_course_data(param)
     if course:
       send_course_to_user(user_id, course)
     else:
-      bot.send_message(user_id, "❌ यह लिंक उपलब्ध नहीं है।")
+      bot.send_message(user_id, "❌ <b>This link is not available.</b>\n<i>(Yeh link available nahi hai.)</i>", parse_mode="HTML")
   else:
     if user_id == ADMIN_ID:
       send_admin_panel(user_id)
     else:
       bot.send_message(
-          user_id, "नमस्कार! कृपया कोर्स के सही लिंक पर क्लिक करके आएँ।"
+          user_id, "👋 <b>Hello! Please click on the correct course link to enter.</b>\n<i>(Namaste! Kripya sahi course link par click karke aayein.)</i>", parse_mode="HTML"
       )
 
 
@@ -434,7 +434,7 @@ def send_admin_panel(chat_id):
   )
   markup.row(
       InlineKeyboardButton(
-          "📦 Course Batch (मल्टी-कोर्स)", callback_data="admin_create_batch"
+          "📦 Course Batch (Multi-Course)", callback_data="admin_create_batch"
       )
   )
   markup.row(
@@ -442,7 +442,8 @@ def send_admin_panel(chat_id):
   )
   bot.send_message(
       chat_id,
-      "🛠 <b>एडमिन पैनल</b>\nकृपया कोई विकल्प चुनें:",
+      "🛠 <b>Admin Panel</b>\nPlease select an option:\n"
+      "<i>(Kripya koi option chunein:)</i>",
       reply_markup=markup,
       parse_mode="HTML"
   )
@@ -465,9 +466,9 @@ def handle_all_messages(message):
       admin_data[ADMIN_ID]["promo"] = []
       bot.send_message(
           ADMIN_ID,
-          f"✅ बैच टाइटल सेव: <b>{admin_data[ADMIN_ID]['title']}</b>\n\n📝 <b>पहले"
-          " कोर्स का प्रोमो मीडिया भेजें (फोटो/वीडियो)।</b>\n(भेजने के बाद नीचे"
-          " 'Next' बटन दबाएं)",
+          f"✅ Batch title saved: <b>{admin_data[ADMIN_ID]['title']}</b>\n\n"
+          "📝 <b>Send the promo media (photo/video) for the first course.</b>\n"
+          "<i>(Pehle course ka promo media bhejein. Bhejne ke baad niche 'Next' button dabayein.)</i>",
           parse_mode="HTML",
           reply_markup=InlineKeyboardMarkup().row(
               InlineKeyboardButton("➡️ Next Step", callback_data="next_price")
@@ -493,20 +494,20 @@ def handle_all_messages(message):
       clean_amt = re.sub(r"[^\d.]", "", message.text.strip())
       if not clean_amt:
         bot.send_message(
-            ADMIN_ID, "❌ कृपया केवल संख्या में कीमत लिखें (उदा: 199 या 499)।"
+            ADMIN_ID, "❌ <b>Please enter the price in numbers only (e.g., 199 or 499).</b>\n<i>(Kripya sirf numbers mein price likhein.)</i>", parse_mode="HTML"
         )
         return
       admin_data[ADMIN_ID]["amount"] = clean_amt
       admin_data[ADMIN_ID]["step"] = "CAPTION"
       markup = InlineKeyboardMarkup().row(
           InlineKeyboardButton(
-              "⏭ Skip (कोई कैप्शन नहीं)", callback_data="skip_caption"
+              "⏭ Skip (No Caption)", callback_data="skip_caption"
           )
       )
       bot.send_message(
           ADMIN_ID,
-          f"✅ <b>कीमत ₹{clean_amt} सेव!</b>\n\n📝 कोई अतिरिक्त कैप्शन या पेमेंट"
-          " नोट लिखना है तो टाइप करें, वरना 'Skip' दबाएं।",
+          f"✅ <b>Price ₹{clean_amt} saved!</b>\n\n📝 Type any extra caption or payment note, otherwise press 'Skip'.\n"
+          "<i>(Koi extra caption likhna hai toh type karein, warna 'Skip' dabayein.)</i>",
           reply_markup=markup,
           parse_mode="HTML"
       )
@@ -516,7 +517,7 @@ def handle_all_messages(message):
       admin_data[ADMIN_ID]["caption"] = message.text.strip()
       admin_data[ADMIN_ID]["step"] = "SECRET"
       bot.send_message(
-          ADMIN_ID, "✅ <b>कैप्शन सेव!</b>\n\n🔗 अब इसका फाइनल सीक्रेट लिंक भेजें:", parse_mode="HTML"
+          ADMIN_ID, "✅ <b>Caption saved!</b>\n\n🔗 Now send the final secret link:\n<i>(Ab iska final secret link bhejein:)</i>", parse_mode="HTML"
       )
       return
 
@@ -553,8 +554,8 @@ def handle_all_messages(message):
         link = f"https://t.me/{bot.get_me().username}?start={course_id}"
         bot.send_message(
             ADMIN_ID,
-            f"🎉 <b>कोर्स बन गया!</b>\n\n💰 कीमत: ₹{admin_data[ADMIN_ID]['amount']}\n👉"
-            f" <code>{link}</code>",
+            f"🎉 <b>Course created!</b>\n\n💰 Price: ₹{admin_data[ADMIN_ID]['amount']}\n👉 "
+            f"<code>{link}</code>\n<i>(Course ban gaya hai!)</i>",
             parse_mode="HTML",
         )
         del admin_data[ADMIN_ID]
@@ -574,9 +575,9 @@ def handle_all_messages(message):
         )
         bot.send_message(
             ADMIN_ID,
-            f"✅ <b>कोर्स सेव हो गया! (Total:"
-            f" {len(admin_data[ADMIN_ID]['course_ids'])})</b>\n\nक्या आप इस बैच"
-            " में एक और कोर्स जोड़ना चाहते हैं?",
+            f"✅ <b>Course saved! (Total: {len(admin_data[ADMIN_ID]['course_ids'])})</b>\n\n"
+            "Do you want to add another course to this batch?\n"
+            "<i>(Kya aap is batch mein ek aur course add karna chahte hain?)</i>",
             reply_markup=markup,
             parse_mode="HTML"
         )
@@ -603,7 +604,10 @@ def handle_all_messages(message):
     amt_text = course["amount"] if course else ""
 
     check_msg = bot.send_message(
-        user_id, "⏳ आपका पेमेंट प्रूफ मिल गया है। 5 मिनट में अप्रूव हो जाएगा..."
+        user_id, 
+        "⏳ <b>Your payment proof is received. It will be approved in 5 minutes...</b>\n"
+        "<i>(Aapka payment proof mil gaya hai. 5 min mein approve ho jayega...)</i>", 
+        parse_mode="HTML"
     )
 
     markup = InlineKeyboardMarkup()
@@ -654,7 +658,7 @@ def handle_all_messages(message):
           args=(user_id, check_msg.message_id, admin_msg.message_id, course_id),
       ).start()
     except Exception as e:
-      bot.send_message(ADMIN_ID, f"⚠️ चैनल एरर: {e}")
+      bot.send_message(ADMIN_ID, f"⚠️ Error: {e}")
 
     del user_states[user_id]
 
@@ -698,8 +702,8 @@ def handle_buttons(call):
 
       invoice_text += (
           "\n👉 <b>Payment Instructions:</b>\n"
-          "* Please send the payment screenshot here.\n\n"
-          "* पेमेंट के बाद <b>12-अंकों का UTR No.</b> या <b>स्क्रीनशॉट</b> यहीं भेजें।\n\n\n"
+          "* Please send the <b>12-digit UTR No.</b> or <b>Payment Screenshot</b> here.\n"
+          "<i>(Payment ke baad 12-digit UTR No. ya screenshot yahin bhejein.)</i>\n\n"
           "⏳ <i>The payment QR will expire in 10 minutes!</i>"
       )
 
@@ -735,8 +739,8 @@ def handle_buttons(call):
         InlineKeyboardButton("➡️ Next Step", callback_data="next_price")
     )
     bot.edit_message_text(
-        "📝 <b>Step 1/4: प्रोमो मीडिया</b>\nगैलरी से डेमो फोटो/वीडियो भेजें (एल्बम"
-        " के लिए एक साथ चुनें)। फिर 'Next Step' दबाएं।",
+        "📝 <b>Step 1/4: Promo Media</b>\nSend demo photo/video from gallery. Then press 'Next Step'.\n"
+        "<i>(Gallery se demo photo/video bhejein. Phir 'Next Step' dabayein.)</i>",
         chat_id=chat_id,
         message_id=msg_id,
         reply_markup=markup,
@@ -746,8 +750,8 @@ def handle_buttons(call):
   elif data == "admin_create_batch":
     admin_data[ADMIN_ID] = {"mode": "batch", "step": "TITLE", "course_ids": []}
     bot.edit_message_text(
-        "📦 <b>नया कोर्स बैच बनाएँ</b>\n\nकृपया इस बैच का <b>नाम/टाइटल</b> टाइप करके"
-        " भेजें:",
+        "📦 <b>Create New Course Batch</b>\n\nPlease type and send the <b>Name/Title</b> for this batch:\n"
+        "<i>(Kripya is batch ka naam/title type karke bhejein:)</i>",
         chat_id=chat_id,
         message_id=msg_id,
         parse_mode="HTML"
@@ -756,13 +760,13 @@ def handle_buttons(call):
   elif data == "next_price":
     if ADMIN_ID not in admin_data or not admin_data[ADMIN_ID].get("promo"):
       bot.answer_callback_query(
-          call.id, "❌ पहले मीडिया भेजें!", show_alert=True
+          call.id, "❌ Please send media first!", show_alert=True
       )
       return
     admin_data[ADMIN_ID]["step"] = "AMOUNT"
     bot.edit_message_text(
-        "💰 <b>Step 2/4: कीमत</b>\n\nइस कोर्स की कीमत (₹) भेजें (उदा: <code>299</code> या"
-        " <code>499</code>):",
+        "💰 <b>Step 2/4: Price</b>\n\nSend the price (₹) for this course (e.g., <code>299</code> or <code>499</code>):\n"
+        "<i>(Is course ki price bhejein:)</i>",
         chat_id=chat_id,
         message_id=msg_id,
         parse_mode="HTML"
@@ -773,8 +777,8 @@ def handle_buttons(call):
       admin_data[ADMIN_ID]["caption"] = ""
       admin_data[ADMIN_ID]["step"] = "SECRET"
       bot.edit_message_text(
-          "✅ <b>कैप्शन स्किप!</b>\n\n🔗 <b>Step 4/4: फाइनल लिंक</b>\nफाइनल सीक्रेट"
-          " लिंक भेजें।",
+          "✅ <b>Caption Skipped!</b>\n\n🔗 <b>Step 4/4: Final Link</b>\nSend the final secret link.\n"
+          "<i>(Final secret link bhejein.)</i>",
           chat_id=chat_id,
           message_id=msg_id,
           parse_mode="HTML"
@@ -788,7 +792,8 @@ def handle_buttons(call):
         InlineKeyboardButton("➡️ Next Step", callback_data="next_price")
     )
     bot.edit_message_text(
-        "📝 <b>अगले कोर्स का प्रोमो मीडिया भेजें</b>\nफिर 'Next Step' दबाएं।",
+        "📝 <b>Send promo media for the next course</b>\nThen press 'Next Step'.\n"
+        "<i>(Agle course ka promo media bhejein. Phir 'Next Step' dabayein.)</i>",
         chat_id=chat_id,
         message_id=msg_id,
         reply_markup=markup,
@@ -821,8 +826,9 @@ def handle_buttons(call):
 
     link = f"https://t.me/{bot.get_me().username}?start={batch_id}"
     bot.edit_message_text(
-        f"🎉 <b>कोर्स बैच बन गया!</b>\n\n📦 <b>Title:</b> {d['title']}\n📚 <b>Total"
-        f" Courses:</b> {len(d['course_ids'])}\n\n👉 <code>{link}</code> 👈",
+        f"🎉 <b>Course Batch Created!</b>\n\n📦 <b>Title:</b> {d['title']}\n📚 <b>Total"
+        f" Courses:</b> {len(d['course_ids'])}\n\n👉 <code>{link}</code> 👈\n"
+        "<i>(Course batch ban gaya hai!)</i>",
         chat_id=chat_id,
         message_id=msg_id,
         parse_mode="HTML",
@@ -841,9 +847,10 @@ def handle_buttons(call):
 
     if not records:
       bot.edit_message_text(
-          "अभी तक किसी ने कोर्स नहीं खरीदा है।",
+          "No one has bought a course yet.\n<i>(Abhi tak kisi ne course nahi kharida hai.)</i>",
           chat_id=chat_id,
           message_id=msg_id,
+          parse_mode="HTML"
       )
     else:
       text = "👥 <b>Recent Purchases:</b>\n\n"
@@ -998,13 +1005,14 @@ def handle_buttons(call):
 
     retry_markup = InlineKeyboardMarkup().row(
         InlineKeyboardButton(
-            "🔄 Try Again (QR जनरेट करें)", callback_data=f"pay_upi_{course_id}"
+            "🔄 Try Again (Generate QR)", callback_data=f"pay_upi_{course_id}"
         )
     )
     try:
       bot.send_message(
           user_id,
-          f"❌ <b>Payment Denied!</b>\n\n<b>कारण:</b> {reason}",
+          f"❌ <b>Payment Denied!</b>\n\n<b>Reason:</b> {reason}\n\n"
+          f"<i>(Payment reject kar diya gaya hai. Karan: {reason})</i>",
           reply_markup=retry_markup,
           parse_mode="HTML",
       )
@@ -1081,7 +1089,7 @@ if __name__ == "__main__":
   port = int(os.environ.get("PORT", 10000))
 
   def run_bot():
-    print("🚀 बोट पूरी तरह तैयार होकर स्टार्ट हो गया है...")
+    print("🚀 Bot is fully ready and started... (Bot puri tarah taiyar hokar start ho gaya hai...)")
     bot.infinity_polling(skip_pending=True)
 
   t = threading.Thread(target=run_bot, daemon=True)
