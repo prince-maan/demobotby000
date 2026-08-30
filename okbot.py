@@ -561,7 +561,7 @@ def handle_all_messages(message):
     check_msg = bot.send_message(
         user_id, 
         "⏳ <b>Your payment proof is received. It will be approved in 5 minutes...</b>\n"
-        "<i>(Aapka payment proof mil gaya hai. 5 min mein approve ho jayega...)</i>", 
+        "<i>(Aapka payment proof mil gaya hai. 5 min mein approve ho jayega... @SaulGoodmanOp )</i>", 
         parse_mode="HTML"
     )
 
@@ -656,8 +656,8 @@ def handle_buttons(call):
         invoice_text += f"\n📝 {course['custom_caption']}\n"
 
       invoice_text += (
-          "\n👉 <b>Payment Instructions:</b>\n"
-          "* Please send the <b>12-digit UTR No.</b> or <b>Payment Screenshot</b> here.\n"
+          "\n👉 <b>Payment Instructions:</b>\n\n"
+          "* Please send the <b>Payment Screenshot</b> here.\n\n"
           "<i>(Payment ke baad 12-digit UTR No. ya screenshot yahin bhejein.)</i>\n\n"
           "⏳ <i>The payment QR will expire in 10 minutes!</i>"
       )
