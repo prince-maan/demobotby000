@@ -698,9 +698,9 @@ def handle_buttons(call):
 
       invoice_text += (
           "\n👉 <b>Payment Instructions:</b>\n"
-          "1. ऊपर दिए QR कोड को किसी भी UPI ऐप (PhonePe / GPay / Paytm) से स्कैन करें या UPI ID कॉपी करें।\n"
-          "2. पेमेंट के बाद <b>12-अंकों का UTR No.</b> या <b>स्क्रीनशॉट</b> यहीं भेजें।\n\n"
-          "⏳ <i>पेमेंट QR 10 मिनट में एक्सपायर हो जाएगा!</i>"
+          "* Please send the payment screenshot here.\n\n"
+          "* पेमेंट के बाद <b>12-अंकों का UTR No.</b> या <b>स्क्रीनशॉट</b> यहीं भेजें।\n\n\n"
+          "⏳ <i>The payment QR will expire in 10 minutes!</i>"
       )
 
       markup = InlineKeyboardMarkup()
@@ -978,11 +978,11 @@ def handle_buttons(call):
     parts = data.split("_")
     reason_code, user_id, course_id = parts[1], int(parts[2]), parts[3]
     if reason_code == "fake":
-      reason = "आपका स्क्रीनशॉट अमान्य/फेक है।"
+      reason = "Your screenshot is invalid/fake. Chat now - @SaulGoodmanOp"
     elif reason_code == "notrecv":
-      reason = "हमें आपका पेमेंट प्राप्त नहीं हुआ।"
+      reason = "We haven't received your payment. Chat now - @SaulGoodmanOp"
     elif reason_code == "wrong":
-      reason = "आपने गलत राशि भेजी है।"
+      reason = "You have sent the wrong amount. Chat now - @SaulGoodmanOp"
 
     if user_id in pending_verifications:
       try:
