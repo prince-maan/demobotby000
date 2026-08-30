@@ -237,8 +237,8 @@ def expire_qr(chat_id, message_id, course_id):
       bot.delete_message(chat_id, message_id)
       bot.send_message(
           chat_id,
-          "❌ <b>आपका पेमेंट सेशन (10 मिनट) एक्सपायर हो गया है!</b>\nकृपया फिर से"
-          " शुरुआत करें।",
+          "❌ <b>आपका पेमेंट सेशन (10 मिनट) एक्सपायर हो गया है!\nYour payment session (10 minutes) has expired!</b>\nTry again"
+          " Let's get started.",
           parse_mode="HTML",
       )
       del user_states[chat_id]
