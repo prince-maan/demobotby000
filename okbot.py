@@ -18,7 +18,7 @@ from telebot.types import (
 )
 
 # ==========================================
-# 🛑 सेटिंग्स (लोकल और रेंडर दोनों सपोर्टेड) 🛑
+# 🛑 सेटिंग्स (लोकल और रेंडर दोनों के लिए तैयार) 🛑
 # ==========================================
 BOT_TOKEN = os.environ.get(
     "BOT_TOKEN", "8986044820:AAH_NrdyJ1A0ZCsSwPoQ4PuWdLNWXSUYB3U"
@@ -28,7 +28,6 @@ DB_CHANNEL_ID = int(os.environ.get("DB_CHANNEL_ID", "-1003757631353").strip())
 UPI_ID = os.environ.get("UPI_ID", "Q520245588@ybl").strip()
 MERCHANT_NAME = os.environ.get("MERCHANT_NAME", "Study Wala").strip()
 
-# डायरेक्ट लिंक्स
 CHAT_LINK = os.environ.get("CHAT_LINK", "https://t.me/princemaan00").strip()
 INTERNATIONAL_LINK = os.environ.get(
     "INTERNATIONAL_LINK", "https://t.me/princemaan00"
@@ -110,7 +109,7 @@ def get_batch_data(batch_id):
   return load_backup().get("batches", {}).get(batch_id)
 
 
-# --- ब्रांडेड UPI QR जनरेटर ---
+# --- ऑटोमैटिक UPI QR जनरेटर ---
 def generate_upi_qr(amount, order_id):
   clean_amt = re.sub(r"[^\d.]", "", str(amount))
   upi_url = f"upi://pay?pa={UPI_ID}&pn={MERCHANT_NAME}&am={clean_amt}&cu=INR&tn=Order_{order_id}"
@@ -118,33 +117,32 @@ def generate_upi_qr(amount, order_id):
   qr = qrcode.QRCode(
       version=None,
       error_correction=qrcode.constants.ERROR_CORRECT_H,
-      box_size=12,
-      border=3,
+      box_size=10,
+      border=2,
   )
   qr.add_data(upi_url)
   qr.make(fit=True)
 
-  qr_img = qr.make_image(
-      fill_color="#0b1329", back_color="#ffffff"
-  ).convert("RGBA")
+  qr_img = qr.make_image(fill_color="black", back_color="white").convert(
+      "RGBA"
+  )
   w, h = qr_img.size
 
-  box_w = int(w * 0.38)
-  box_h = int(box_w * 0.48)
+  box_w = int(w * 0.36)
+  box_h = int(box_w * 0.50)
   box_x = (w - box_w) // 2
   box_y = (h - box_h) // 2
 
   draw = ImageDraw.Draw(qr_img)
   draw.rounded_rectangle(
-      [box_x - 3, box_y - 3, box_x + box_w + 3, box_y + box_h + 3],
-      radius=12,
+      [box_x - 2, box_y - 2, box_x + box_w + 2, box_y + box_h + 2],
+      radius=8,
       fill="#0b1329",
   )
   draw.rounded_rectangle(
-      [box_x, box_y, box_x + box_w, box_y + box_h], radius=10, fill="#ffffff"
+      [box_x, box_y, box_x + box_w, box_y + box_h], radius=6, fill="#ffffff"
   )
 
-  # Arrows
   arrow_x = box_x + int(box_w * 0.12)
   arrow_y = box_y + int(box_h * 0.18)
   arrow_h = int(box_h * 0.42)
@@ -173,9 +171,9 @@ def generate_upi_qr(amount, order_id):
 
   draw.rectangle(
       [
-          arrow_x + arrow_w * 2 + 5,
+          arrow_x + arrow_w * 2 + 4,
           arrow_y + 2,
-          arrow_x + arrow_w * 2 + 35,
+          arrow_x + arrow_w * 2 + 28,
           arrow_y + arrow_h - 2,
       ],
       fill="#111827",
@@ -183,7 +181,7 @@ def generate_upi_qr(amount, order_id):
 
   strip_y = box_y + int(box_h * 0.68)
   draw.line(
-      [(box_x + 8, strip_y), (box_x + box_w - 8, strip_y)],
+      [(box_x + 6, strip_y), (box_x + box_w - 6, strip_y)],
       fill="#e2e8f0",
       width=1,
   )
@@ -191,27 +189,27 @@ def generate_upi_qr(amount, order_id):
   draw.ellipse(
       [
           box_x + int(box_w * 0.20),
-          strip_y + 4,
-          box_x + int(box_w * 0.20) + 8,
-          strip_y + 12,
+          strip_y + 3,
+          box_x + int(box_w * 0.20) + 6,
+          strip_y + 9,
       ],
       fill="#1a73e8",
   )
   draw.ellipse(
       [
           box_x + int(box_w * 0.48),
-          strip_y + 4,
-          box_x + int(box_w * 0.48) + 8,
-          strip_y + 12,
+          strip_y + 3,
+          box_x + int(box_w * 0.48) + 6,
+          strip_y + 9,
       ],
       fill="#5f259f",
   )
   draw.ellipse(
       [
           box_x + int(box_w * 0.76),
-          strip_y + 4,
-          box_x + int(box_w * 0.76) + 8,
-          strip_y + 12,
+          strip_y + 3,
+          box_x + int(box_w * 0.76) + 6,
+          strip_y + 9,
       ],
       fill="#00b9f5",
   )
@@ -284,7 +282,7 @@ def expire_verification(user_id, checking_msg_id, admin_msg_id, course_id):
     del pending_verifications[user_id]
 
 
-# --- ओरिजिनल कोर्स डिस्प्ले फ़ंक्शन (Exact okbot.py Logic) ---
+# --- ओरिजिनल कोर्स सेंड फंक्शन (Exact okbot.py Layout) ---
 def send_course_to_user(chat_id, course):
   promo_items = json.loads(course["promo_media"])
 
@@ -437,7 +435,7 @@ def handle_all_messages(message):
           " 'Next' बटन दबाएं)",
           parse_mode="Markdown",
           reply_markup=InlineKeyboardMarkup().row(
-              InlineKeyboardButton("➡️ Next: Set Price", callback_data="next_price")
+              InlineKeyboardButton("➡️ Next Step", callback_data="next_price")
           ),
       )
       return
@@ -449,12 +447,10 @@ def handle_all_messages(message):
       elif message.video:
         media_type, file_id = "video", message.video.file_id
 
-      # ओरिजिनल कैप्शन को वैसे ही सुरक्षित रखें
-      caption_text = message.caption or message.text or ""
       admin_data[ADMIN_ID]["promo"].append({
           "type": media_type,
           "file_id": file_id,
-          "caption": caption_text,
+          "caption": message.caption or message.text or "",
       })
       return
 
@@ -474,8 +470,8 @@ def handle_all_messages(message):
       )
       bot.send_message(
           ADMIN_ID,
-          f"✅ **कीमत ₹{clean_amt} सेव!**\n\n📝 कोई अतिरिक्त पेमेंट नोट लिखना"
-          " है तो टाइप करें, वरना 'Skip' दबाएं।",
+          f"✅ **कीमत ₹{clean_amt} सेव!**\n\n📝 कोई अतिरिक्त कैप्शन या पेमेंट"
+          " नोट लिखना है तो टाइप करें, वरना 'Skip' दबाएं।",
           reply_markup=markup,
       )
       return
@@ -588,7 +584,7 @@ def handle_all_messages(message):
         f"👤 User: {first_name} {username}\n"
         f"🆔 User ID: `{user_id}`\n"
         f"📚 Course: `{course_id}`\n"
-        f"💰 Amount (Rate): ₹{amt_text}\n"
+        f"💰 Amount: ₹{amt_text}\n"
         f"🔖 Order ID: `{order_id}`"
     )
 
@@ -737,7 +733,7 @@ def handle_buttons(call):
       admin_data[ADMIN_ID]["step"] = "SECRET"
       bot.edit_message_text(
           "✅ **कैप्शन स्किप!**\n\n🔗 **Step 4/4: फाइनल लिंक**\nफाइनल सीक्रेट"
-          " लिंक/मैसेज भेजें।",
+          " लिंक भेजें।",
           chat_id=chat_id,
           message_id=msg_id,
       )
@@ -1042,7 +1038,7 @@ if __name__ == "__main__":
   port = int(os.environ.get("PORT", 10000))
 
   def run_bot():
-    print("🚀 बोट स्टार्ट हो गया है...")
+    print("🚀 बोट पूरी तरह तैयार होकर स्टार्ट हो गया है...")
     bot.infinity_polling(skip_pending=True)
 
   t = threading.Thread(target=run_bot, daemon=True)
