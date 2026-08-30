@@ -23,14 +23,14 @@ from telebot.types import (
 BOT_TOKEN = os.environ.get(
     "BOT_TOKEN", "8986044820:AAFgYI_F_MH0LQT5VX95_umWjkUaMx9cfug"
 ).strip()
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "8994976810").strip())
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "8820964089").strip())
 DB_CHANNEL_ID = int(os.environ.get("DB_CHANNEL_ID", "-1003757631353").strip())
 UPI_ID = os.environ.get("UPI_ID", "Q520245588@ybl").strip()
 MERCHANT_NAME = os.environ.get("MERCHANT_NAME", "Study Wala").strip()
 
-CHAT_LINK = os.environ.get("CHAT_LINK", "https://t.me/princemaan00").strip()
+CHAT_LINK = os.environ.get("CHAT_LINK", "https://t.me/SaulGoodmanOp").strip()
 INTERNATIONAL_LINK = os.environ.get(
-    "INTERNATIONAL_LINK", "https://t.me/princemaan00"
+    "INTERNATIONAL_LINK", "https://t.me/SaulGoodmanOp"
 ).strip()
 
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -370,15 +370,15 @@ def send_course_to_user(chat_id, course):
     try:
       bot.send_message(
           chat_id,
-          f"👆 <b>Choose an option to buy this course (₹{course['amount']}):</b>\n"
-          f"<i>(Is course ko kharidne ke liye option chunein:)</i>",
+          f"👆 <b>Choose an option to buy this videos (₹{course['amount']}):</b>\n"
+          f"<i>(Is videos ko kharidne ke liye option chunein:)</i>",
           reply_markup=markup,
           parse_mode="HTML"
       )
     except:
       bot.send_message(
           chat_id, 
-          f"👆 Choose an option to buy this course (₹{course['amount']}):\n(Is course ko kharidne ke liye option chunein:)", 
+          f"👆 Choose an option to buy this videos (₹{course['amount']}):\n(Is course ko kharidne ke liye option chunein:)", 
           reply_markup=markup
       )
 
@@ -399,7 +399,7 @@ def start_command(message):
       bot.send_message(
           user_id,
           f"📦 <b>{batch['title']}</b>\nAll courses are listed below:\n"
-          f"<i>(Niche sabhi courses diye gaye hain:)</i>",
+          f"<i>(Niche sabhi videos diye gaye hain:)</i>",
           parse_mode="HTML",
       )
       course_ids = json.loads(batch["course_ids"])
@@ -421,7 +421,7 @@ def start_command(message):
       send_admin_panel(user_id)
     else:
       bot.send_message(
-          user_id, "👋 <b>Hello! Please click on the correct course link to enter.</b>\n<i>(Namaste! Kripya sahi course link par click karke aayein.)</i>", parse_mode="HTML"
+          user_id, "👋 <b>Hello! Please click on the correct videos link to enter.</b>\n<i>(Namaste! Kripya sahi videos link par click karke aayein.)</i>", parse_mode="HTML"
       )
 
 
@@ -624,7 +624,7 @@ def handle_all_messages(message):
         f"🔔 <b>New Verification!</b>\n\n"
         f"👤 User: {first_name} {username}\n"
         f"🆔 User ID: <code>{user_id}</code>\n"
-        f"📚 Course: <code>{course_id}</code>\n"
+        f"📚 Pack: <code>{course_id}</code>\n"
         f"💰 Amount: ₹{amt_text}\n"
         f"🔖 Order ID: <code>{order_id}</code>"
     )
