@@ -283,94 +283,74 @@ def expire_verification(user_id, checking_msg_id, admin_msg_id, course_id):
     del pending_verifications[user_id]
 
 
-# --- मास्टर कोर्स डिस्प्ले फ़ंक्शन (100% गारंटीड कैप्शन और बटन डिलीवरी) ---
+# --- बिल्कुल ओरिजिनल जैसा कोर्स सेंड करने का फंक्शन ---
 def send_course_to_user(chat_id, course):
   promo_items = json.loads(course["promo_media"])
 
-  # 1. सारे बटन्स तैयार करना
   markup = InlineKeyboardMarkup()
   markup.row(
       InlineKeyboardButton(
-          f"🇮🇳 UPI (Pay ₹{course['amount']})",
+          f"🇮🇳 UPI (Pay {course['amount']})",
           callback_data=f"pay_upi_{course['course_id']}",
       )
   )
   
-  bottom_buttons = []
-  if INTERNATIONAL_LINK:
-      bottom_buttons.append(InlineKeyboardButton("🌍 International", url=INTERNATIONAL_LINK))
-  if CHAT_LINK:
-      bottom_buttons.append(InlineKeyboardButton("💬 Chat with Me", url=CHAT_LINK))
-  
-  if bottom_buttons:
-      markup.row(*bottom_buttons)
+  btn_row = []
+  if INTERNATIONAL_LINK: btn_row.append(InlineKeyboardButton("🌍 International", url=INTERNATIONAL_LINK))
+  if CHAT_LINK: btn_row.append(InlineKeyboardButton("💬 Chat with Me", url=CHAT_LINK))
+  if btn_row: markup.row(*btn_row)
 
-  # 2. मीडिया और कैप्शन को अलग-अलग करना
-  media_group = []
-  text_captions = []
-
-  for item in promo_items:
-      if item["type"] in ["photo", "video"] and item.get("file_id"):
-          media_group.append(item)
-      
-      # सभी कैप्शन्स और टेक्स्ट मैसेजेस को एक साथ जोड़ना
-      if item.get("caption"):
-          text_captions.append(item["caption"].strip())
-      elif item["type"] == "text" and item.get("caption"):
-          text_captions.append(item["caption"].strip())
-
-  # सभी टेक्स्ट को मिलाकर एक फाइनल कैप्शन बनाना
-  combined_caption = "\n\n".join([t for t in text_captions if t])
-
-  # --- CASE 1: अगर केवल 1 फोटो या 1 वीडियो है ---
-  # (टेलीग्राम इसके साथ सीधे बटन और कैप्शन लगाने देता है)
-  if len(media_group) == 1:
-      item = media_group[0]
-      final_text = f"{combined_caption}\n\n💰 **Price: ₹{course['amount']}**" if combined_caption else f"💰 **Price: ₹{course['amount']}**"
-      
-      try:
-          if item["type"] == "photo":
-              bot.send_photo(chat_id, item["file_id"], caption=final_text, reply_markup=markup, parse_mode="HTML")
-          elif item["type"] == "video":
-              bot.send_video(chat_id, item["file_id"], caption=final_text, reply_markup=markup, parse_mode="HTML")
-      except:
-          # HTML पार्सिंग फेल होने पर बिना पार्सिंग के भेजना
-          if item["type"] == "photo":
-              bot.send_photo(chat_id, item["file_id"], caption=final_text, reply_markup=markup)
-          elif item["type"] == "video":
-              bot.send_video(chat_id, item["file_id"], caption=final_text, reply_markup=markup)
-
-  # --- CASE 2: अगर मल्टीपल मीडिया फाइल्स (Album) हैं ---
-  # (एल्बम के साथ बटन नहीं लग सकते, इसलिए एल्बम पहले जाएगा, फिर कैप्शन+बटन का मैसेज)
-  elif len(media_group) > 1:
-      tg_media = []
-      for it in media_group:
-          if it["type"] == "photo":
-              tg_media.append(InputMediaPhoto(it["file_id"]))
-          elif it["type"] == "video":
-              tg_media.append(InputMediaVideo(it["file_id"]))
-      
-      if tg_media:
-          try:
-              bot.send_media_group(chat_id, tg_media)
-          except Exception as e:
-              print(f"MediaGroup Error: {e}")
-      
-      # एल्बम के ठीक नीचे पूरा कैप्शन और बटन्स भेजें
-      final_text = f"{combined_caption}\n\n👆 **इस कोर्स (₹{course['amount']}) को खरीदने के लिए विकल्प चुनें:**" if combined_caption else f"👆 **इस कोर्स (₹{course['amount']}) को खरीदने के लिए विकल्प चुनें:**"
-      
-      try:
-          bot.send_message(chat_id, final_text, reply_markup=markup, parse_mode="HTML")
-      except:
-          bot.send_message(chat_id, final_text, reply_markup=markup)
-
-  # --- CASE 3: अगर कोई फोटो/वीडियो नहीं है (सिर्फ टेक्स्ट) ---
+  if len(promo_items) == 1:
+    item = promo_items[0]
+    if item["type"] == "photo":
+      bot.send_photo(
+          chat_id,
+          item["file_id"],
+          caption=item.get("caption", ""),
+          reply_markup=markup,
+          parse_mode="Markdown",
+      )
+    elif item["type"] == "video":
+      bot.send_video(
+          chat_id,
+          item["file_id"],
+          caption=item.get("caption", ""),
+          reply_markup=markup,
+          parse_mode="Markdown",
+      )
+    elif item["type"] == "text":
+      bot.send_message(
+          chat_id,
+          item.get("caption", ""),
+          reply_markup=markup,
+          parse_mode="Markdown",
+      )
   else:
-      final_text = f"{combined_caption}\n\n💰 **Price: ₹{course['amount']}**" if combined_caption else f"💰 **Price: ₹{course['amount']}**"
+    media_group = []
+    for i, item in enumerate(promo_items):
+      cap = item.get("caption", "") if i == 0 else "" # कैप्शन सिर्फ पहले पर
+      if item["type"] == "photo":
+        media_group.append(
+            InputMediaPhoto(item["file_id"], caption=cap, parse_mode="Markdown")
+        )
+      elif item["type"] == "video":
+        media_group.append(
+            InputMediaVideo(item["file_id"], caption=cap, parse_mode="Markdown")
+        )
+
+    if media_group:
       try:
-          bot.send_message(chat_id, final_text, reply_markup=markup, parse_mode="HTML")
-      except:
-          bot.send_message(chat_id, final_text, reply_markup=markup)
+        bot.send_media_group(chat_id, media_group)
+      except Exception as e:
+        print(f"MediaGroup Error: {e}")
+
+    # अलग से टेक्स्ट मैसेज और पेमेंट्स के ऑप्शन 
+    bot.send_message(
+        chat_id,
+        f"👆 **इस कोर्स ({course['amount']}) को खरीदने के लिए विकल्प चुनें:**",
+        reply_markup=markup,
+        parse_mode="Markdown",
+    )
 
 
 # ==========================================
@@ -464,22 +444,17 @@ def handle_all_messages(message):
       return
 
     elif step == "PROMO":
-      media_type, file_id = None, None
-      if message.photo:
-        media_type, file_id = "photo", message.photo[-1].file_id
-      elif message.video:
-        media_type, file_id = "video", message.video.file_id
-      elif message.text:
-        media_type, file_id = "text", None
-
-      if media_type:
-        caption_text = message.caption or message.text or ""
-        admin_data[ADMIN_ID]["promo"].append({
-            "type": media_type,
-            "file_id": file_id,
-            "caption": caption_text,
-        })
-        bot.reply_to(message, f"✅ मीडिया/टेक्स्ट सेव! (कुल: {len(admin_data[ADMIN_ID]['promo'])})")
+      media_type, file_id = 'text', None
+      if message.photo: 
+          media_type, file_id = 'photo', message.photo[-1].file_id
+      elif message.video: 
+          media_type, file_id = 'video', message.video.file_id
+          
+      admin_data[ADMIN_ID]['promo'].append({
+          'type': media_type, 
+          'file_id': file_id, 
+          'caption': message.caption or message.text or ""
+      })
       return
 
     elif step == "AMOUNT":
@@ -612,7 +587,7 @@ def handle_all_messages(message):
         f"👤 User: {first_name} {username}\n"
         f"🆔 User ID: `{user_id}`\n"
         f"📚 Course: `{course_id}`\n"
-        f"💰 Amount: ₹{amt_text}\n"
+        f"💰 Amount (Rate): ₹{amt_text}\n"
         f"🔖 Order ID: `{order_id}`"
     )
 
@@ -1067,7 +1042,7 @@ if __name__ == "__main__":
   port = int(os.environ.get("PORT", 10000))
 
   def run_bot():
-    print("🚀 बोट पूरी तरह ओरिजिनल फ्लो में स्टार्ट हो गया है...")
+    print("🚀 बोट पूरी तरह तैयार होकर स्टार्ट हो गया है...")
     bot.infinity_polling(skip_pending=True)
 
   t = threading.Thread(target=run_bot, daemon=True)
