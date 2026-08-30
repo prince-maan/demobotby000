@@ -1,2 +1,5 @@
 pyTelegramBotAPI
+qrcode
+pillow
 Flask
+gunicorn
