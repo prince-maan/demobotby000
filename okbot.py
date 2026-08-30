@@ -128,91 +128,46 @@ def generate_upi_qr(amount, order_id):
   )
   w, h = qr_img.size
 
-  box_w = int(w * 0.36)
-  box_h = int(box_w * 0.50)
+  # --- UPI LOGO DRAWING ---
+  box_w = int(w * 0.28)
+  box_h = int(box_w * 0.40)
   box_x = (w - box_w) // 2
   box_y = (h - box_h) // 2
 
   draw = ImageDraw.Draw(qr_img)
+  
+  # White background box
   draw.rounded_rectangle(
-      [box_x - 2, box_y - 2, box_x + box_w + 2, box_y + box_h + 2],
-      radius=8,
-      fill="#0b1329",
-  )
-  draw.rounded_rectangle(
-      [box_x, box_y, box_x + box_w, box_y + box_h], radius=6, fill="#ffffff"
+      [box_x, box_y, box_x + box_w, box_y + box_h], 
+      radius=6, fill="#ffffff", outline="#0b1329", width=2
   )
 
-  arrow_x = box_x + int(box_w * 0.12)
-  arrow_y = box_y + int(box_h * 0.18)
-  arrow_h = int(box_h * 0.42)
-  arrow_w = int(arrow_h * 0.55)
-
-  draw.polygon(
-      [
-          (arrow_x, arrow_y),
-          (arrow_x + arrow_w, arrow_y + (arrow_h // 2)),
-          (arrow_x, arrow_y + arrow_h),
-          (arrow_x + int(arrow_w * 0.4), arrow_y + (arrow_h // 2)),
-      ],
-      fill="#097939",
-  )
-
-  ox = arrow_x + int(arrow_w * 0.6)
-  draw.polygon(
-      [
-          (ox, arrow_y),
-          (ox + arrow_w, arrow_y + (arrow_h // 2)),
-          (ox, arrow_y + arrow_h),
-          (ox + int(arrow_w * 0.4), arrow_y + (arrow_h // 2)),
-      ],
-      fill="#F37021",
-  )
-
-  draw.rectangle(
-      [
-          arrow_x + arrow_w * 2 + 4,
-          arrow_y + 2,
-          arrow_x + arrow_w * 2 + 28,
-          arrow_y + arrow_h - 2,
-      ],
-      fill="#111827",
-  )
-
-  strip_y = box_y + int(box_h * 0.68)
-  draw.line(
-      [(box_x + 6, strip_y), (box_x + box_w - 6, strip_y)],
-      fill="#e2e8f0",
-      width=1,
-  )
-
-  draw.ellipse(
-      [
-          box_x + int(box_w * 0.20),
-          strip_y + 3,
-          box_x + int(box_w * 0.20) + 6,
-          strip_y + 9,
-      ],
-      fill="#1a73e8",
-  )
-  draw.ellipse(
-      [
-          box_x + int(box_w * 0.48),
-          strip_y + 3,
-          box_x + int(box_w * 0.48) + 6,
-          strip_y + 9,
-      ],
-      fill="#5f259f",
-  )
-  draw.ellipse(
-      [
-          box_x + int(box_w * 0.76),
-          strip_y + 3,
-          box_x + int(box_w * 0.76) + 6,
-          strip_y + 9,
-      ],
-      fill="#00b9f5",
-  )
+  # Manual UPI text drawing (Works perfectly everywhere without font files)
+  lw = max(2, int(box_h * 0.12))
+  let_w = box_w * 0.18
+  let_h = box_h * 0.45
+  gap = box_w * 0.08
+  
+  total_w = (let_w * 2) + gap * 2 + lw
+  start_x = box_x + (box_w - total_w) // 2
+  start_y = box_y + (box_h - let_h) // 2
+  
+  # U (Green)
+  u_x = start_x
+  draw.line([(u_x, start_y), (u_x, start_y + let_h)], fill="#097939", width=lw)
+  draw.line([(u_x, start_y + let_h), (u_x + let_w, start_y + let_h)], fill="#097939", width=lw)
+  draw.line([(u_x + let_w, start_y + let_h), (u_x + let_w, start_y)], fill="#097939", width=lw)
+  
+  # P (Orange)
+  p_x = u_x + let_w + gap
+  draw.line([(p_x, start_y), (p_x, start_y + let_h)], fill="#F37021", width=lw)
+  draw.line([(p_x, start_y), (p_x + let_w, start_y)], fill="#F37021", width=lw)
+  draw.line([(p_x + let_w, start_y), (p_x + let_w, start_y + let_h // 2)], fill="#F37021", width=lw)
+  draw.line([(p_x + let_w, start_y + let_h // 2), (p_x, start_y + let_h // 2)], fill="#F37021", width=lw)
+  
+  # I (Blue)
+  i_x = p_x + let_w + gap + lw // 2
+  draw.line([(i_x, start_y), (i_x, start_y + let_h)], fill="#1a73e8", width=lw)
 
   bio = io.BytesIO()
   qr_img.save(bio, "PNG")
@@ -370,15 +325,15 @@ def send_course_to_user(chat_id, course):
     try:
       bot.send_message(
           chat_id,
-          f"👆 <b>Choose an option to buy this videos (₹{course['amount']}):</b>\n"
-          f"<i>(Is videos ko kharidne ke liye option chunein:)</i>",
+          f"👆 <b>Choose an option to buy this pack (₹{course['amount']}):</b>\n"
+          f"<i>(Is pack ko kharidne ke liye option chunein:)</i>",
           reply_markup=markup,
           parse_mode="HTML"
       )
     except:
       bot.send_message(
           chat_id, 
-          f"👆 Choose an option to buy this videos (₹{course['amount']}):\n(Is course ko kharidne ke liye option chunein:)", 
+          f"👆 Choose an option to buy this pack (₹{course['amount']}):\n(Is pack ko kharidne ke liye option chunein:)", 
           reply_markup=markup
       )
 
@@ -398,8 +353,8 @@ def start_command(message):
     if batch:
       bot.send_message(
           user_id,
-          f"📦 <b>{batch['title']}</b>\nAll courses are listed below:\n"
-          f"<i>(Niche sabhi videos diye gaye hain:)</i>",
+          f"📦 <b>{batch['title']}</b>\nAll packs are listed below:\n"
+          f"<i>(Niche sabhi packs diye gaye hain:)</i>",
           parse_mode="HTML",
       )
       course_ids = json.loads(batch["course_ids"])
@@ -408,7 +363,7 @@ def start_command(message):
         if c_data:
           send_course_to_user(user_id, c_data)
     else:
-      bot.send_message(user_id, "❌ <b>This batch link has expired.</b>\n<i>(Yeh batch link expire ho gaya hai.)</i>", parse_mode="HTML")
+      bot.send_message(user_id, "❌ <b>This pack link has expired.</b>\n<i>(Yeh pack link expire ho gaya hai.)</i>", parse_mode="HTML")
 
   elif param.startswith("c_"):
     course = get_course_data(param)
@@ -421,7 +376,7 @@ def start_command(message):
       send_admin_panel(user_id)
     else:
       bot.send_message(
-          user_id, "👋 <b>Hello! Please click on the correct videos link to enter.</b>\n<i>(Namaste! Kripya sahi videos link par click karke aayein.)</i>", parse_mode="HTML"
+          user_id, "👋 <b>Hello! Please click on the correct pack link to enter.</b>\n<i>(Namaste! Kripya sahi pack link par click karke aayein.)</i>", parse_mode="HTML"
       )
 
 
@@ -429,12 +384,12 @@ def send_admin_panel(chat_id):
   markup = InlineKeyboardMarkup()
   markup.row(
       InlineKeyboardButton(
-          "➕ Add Single Course", callback_data="admin_add_course"
+          "➕ Add Single Pack", callback_data="admin_add_course"
       )
   )
   markup.row(
       InlineKeyboardButton(
-          "📦 Course Batch (Multi-Course)", callback_data="admin_create_batch"
+          "📦 Pack Batch (Multi-Pack)", callback_data="admin_create_batch"
       )
   )
   markup.row(
@@ -467,8 +422,8 @@ def handle_all_messages(message):
       bot.send_message(
           ADMIN_ID,
           f"✅ Batch title saved: <b>{admin_data[ADMIN_ID]['title']}</b>\n\n"
-          "📝 <b>Send the promo media (photo/video) for the first course.</b>\n"
-          "<i>(Pehle course ka promo media bhejein. Bhejne ke baad niche 'Next' button dabayein.)</i>",
+          "📝 <b>Send the promo media (photo/video) for the first pack.</b>\n"
+          "<i>(Pehle pack ka promo media bhejein. Bhejne ke baad niche 'Next' button dabayein.)</i>",
           parse_mode="HTML",
           reply_markup=InlineKeyboardMarkup().row(
               InlineKeyboardButton("➡️ Next Step", callback_data="next_price")
@@ -554,8 +509,8 @@ def handle_all_messages(message):
         link = f"https://t.me/{bot.get_me().username}?start={course_id}"
         bot.send_message(
             ADMIN_ID,
-            f"🎉 <b>Course created!</b>\n\n💰 Price: ₹{admin_data[ADMIN_ID]['amount']}\n👉 "
-            f"<code>{link}</code>\n<i>(Course ban gaya hai!)</i>",
+            f"🎉 <b>Pack created!</b>\n\n💰 Price: ₹{admin_data[ADMIN_ID]['amount']}\n👉 "
+            f"<code>{link}</code>\n<i>(Pack ban gaya hai!)</i>",
             parse_mode="HTML",
         )
         del admin_data[ADMIN_ID]
@@ -567,7 +522,7 @@ def handle_all_messages(message):
         markup = InlineKeyboardMarkup()
         markup.row(
             InlineKeyboardButton(
-                "➕ Add Another Course", callback_data="batch_add_next"
+                "➕ Add Another Pack", callback_data="batch_add_next"
             )
         )
         markup.row(
@@ -575,9 +530,9 @@ def handle_all_messages(message):
         )
         bot.send_message(
             ADMIN_ID,
-            f"✅ <b>Course saved! (Total: {len(admin_data[ADMIN_ID]['course_ids'])})</b>\n\n"
-            "Do you want to add another course to this batch?\n"
-            "<i>(Kya aap is batch mein ek aur course add karna chahte hain?)</i>",
+            f"✅ <b>Pack saved! (Total: {len(admin_data[ADMIN_ID]['course_ids'])})</b>\n\n"
+            "Do you want to add another pack to this batch?\n"
+            "<i>(Kya aap is batch mein ek aur pack add karna chahte hain?)</i>",
             reply_markup=markup,
             parse_mode="HTML"
         )
@@ -750,7 +705,7 @@ def handle_buttons(call):
   elif data == "admin_create_batch":
     admin_data[ADMIN_ID] = {"mode": "batch", "step": "TITLE", "course_ids": []}
     bot.edit_message_text(
-        "📦 <b>Create New Course Batch</b>\n\nPlease type and send the <b>Name/Title</b> for this batch:\n"
+        "📦 <b>Create New Pack Batch</b>\n\nPlease type and send the <b>Name/Title</b> for this batch:\n"
         "<i>(Kripya is batch ka naam/title type karke bhejein:)</i>",
         chat_id=chat_id,
         message_id=msg_id,
@@ -765,8 +720,8 @@ def handle_buttons(call):
       return
     admin_data[ADMIN_ID]["step"] = "AMOUNT"
     bot.edit_message_text(
-        "💰 <b>Step 2/4: Price</b>\n\nSend the price (₹) for this course (e.g., <code>299</code> or <code>499</code>):\n"
-        "<i>(Is course ki price bhejein:)</i>",
+        "💰 <b>Step 2/4: Price</b>\n\nSend the price (₹) for this pack (e.g., <code>299</code> or <code>499</code>):\n"
+        "<i>(Is pack ki price bhejein:)</i>",
         chat_id=chat_id,
         message_id=msg_id,
         parse_mode="HTML"
@@ -792,8 +747,8 @@ def handle_buttons(call):
         InlineKeyboardButton("➡️ Next Step", callback_data="next_price")
     )
     bot.edit_message_text(
-        "📝 <b>Send promo media for the next course</b>\nThen press 'Next Step'.\n"
-        "<i>(Agle course ka promo media bhejein. Phir 'Next Step' dabayein.)</i>",
+        "📝 <b>Send promo media for the next pack</b>\nThen press 'Next Step'.\n"
+        "<i>(Agle pack ka promo media bhejein. Phir 'Next Step' dabayein.)</i>",
         chat_id=chat_id,
         message_id=msg_id,
         reply_markup=markup,
@@ -826,9 +781,9 @@ def handle_buttons(call):
 
     link = f"https://t.me/{bot.get_me().username}?start={batch_id}"
     bot.edit_message_text(
-        f"🎉 <b>Course Batch Created!</b>\n\n📦 <b>Title:</b> {d['title']}\n📚 <b>Total"
-        f" Courses:</b> {len(d['course_ids'])}\n\n👉 <code>{link}</code> 👈\n"
-        "<i>(Course batch ban gaya hai!)</i>",
+        f"🎉 <b>Pack Batch Created!</b>\n\n📦 <b>Title:</b> {d['title']}\n📚 <b>Total"
+        f" Packs:</b> {len(d['course_ids'])}\n\n👉 <code>{link}</code> 👈\n"
+        "<i>(Pack batch ban gaya hai!)</i>",
         chat_id=chat_id,
         message_id=msg_id,
         parse_mode="HTML",
@@ -847,7 +802,7 @@ def handle_buttons(call):
 
     if not records:
       bot.edit_message_text(
-          "No one has bought a course yet.\n<i>(Abhi tak kisi ne course nahi kharida hai.)</i>",
+          "No one has bought a pack yet.\n<i>(Abhi tak kisi ne pack nahi kharida hai.)</i>",
           chat_id=chat_id,
           message_id=msg_id,
           parse_mode="HTML"
@@ -934,7 +889,7 @@ def handle_buttons(call):
           f"✅ <b>[PAYMENT APPROVED & DELIVERED]</b>\n\n"
           f"👤 <b>User:</b> {user_name}\n"
           f"🆔 <b>ID:</b> <code>{user_id}</code>\n"
-          f"📚 <b>Course:</b> <code>{course_id}</code>\n"
+          f"📚 <b>Pack:</b> <code>{course_id}</code>\n"
           f"💰 <b>Rate:</b> ₹{course['amount']}\n"
           f"📅 <b>Date:</b> {date_now}"
       )
@@ -1052,7 +1007,7 @@ def handle_buttons(call):
         f"❌ <b>[PAYMENT REJECTED]</b>\n\n"
         f"👤 <b>User:</b> {user_name}\n"
         f"🆔 <b>ID:</b> <code>{user_id}</code>\n"
-        f"📚 <b>Course:</b> <code>{course_id}</code>\n"
+        f"📚 <b>Pack:</b> <code>{course_id}</code>\n"
         f"💰 <b>Rate:</b> ₹{rate_amt}\n"
         f"📅 <b>Date:</b> {date_now}\n"
         f"⚠️ <b>Reason:</b> {reason}"
@@ -1082,7 +1037,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-  return "Telegram Advanced Course Bot is Running Smoothly 24/7!"
+  return "Telegram Advanced Pack Bot is Running Smoothly 24/7!"
 
 
 if __name__ == "__main__":
