@@ -21,7 +21,7 @@ from telebot.types import (
 # 🛑 सेटिंग्स (लोकल और रेंडर दोनों के लिए) 🛑
 # ==========================================
 BOT_TOKEN = os.environ.get(
-    "BOT_TOKEN", "8986044820:AAH_NrdyJ1A0ZCsSwPoQ4PuWdLNWXSUYB3U"
+    "BOT_TOKEN", "8986044820:AAFgYI_F_MH0LQT5VX95_umWjkUaMx9cfug"
 ).strip()
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "8994976810").strip())
 DB_CHANNEL_ID = int(os.environ.get("DB_CHANNEL_ID", "-1003757631353").strip())
