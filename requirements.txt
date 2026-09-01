@@ -1,5 +1,6 @@
 pyTelegramBotAPI
-qrcode
-pillow
+pymongo
+dnspython
 Flask
-gunicorn
+Pillow
+qrcode
