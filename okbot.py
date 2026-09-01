@@ -2,6 +2,7 @@ import io
 import json
 import os
 import re
+import sys
 import threading
 import uuid
 from datetime import datetime
@@ -21,32 +22,33 @@ from telebot.types import (
 )
 
 # ==========================================
-# 🛑 सेटिंग्स और टोकन्स 🛑
+# 🛑 सेटिंग्स और टोकन्स (Render Environment Variables से) 🛑
 # ==========================================
-BOT_TOKEN = os.environ.get(
-    "BOT_TOKEN", "8986044820:AAHbybJywR7I7vbHrfy3p2WWOvlpvEAz5Xw"
-).strip()
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+MONGO_URI = os.environ.get("MONGO_URI")
+
+# अगर Render में ये सेट नहीं होंगे, तो सर्वर एरर देकर रुक जाएगा
+if not BOT_TOKEN or not MONGO_URI:
+    print("❌ ERROR: BOT_TOKEN या MONGO_URI गायब है! कृपया इन्हें Render के Environment Variables में सेट करें।")
+    sys.exit(1)
+
+BOT_TOKEN = BOT_TOKEN.strip()
+MONGO_URI = MONGO_URI.strip()
+
+# बाकी सेटिंग्स (आप चाहें तो इन्हें भी Render में डाल सकते हैं, नहीं तो ये डिफ़ॉल्ट ले लेगा)
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "8820964089").strip())
 DB_CHANNEL_ID = int(os.environ.get("DB_CHANNEL_ID", "-1003757631353").strip())
 UPI_ID = os.environ.get("UPI_ID", "Q520245588@ybl").strip()
 MERCHANT_NAME = os.environ.get("MERCHANT_NAME", "Study Wala").strip()
 
 CHAT_LINK = os.environ.get("CHAT_LINK", "https://t.me/SaulGoodmanOp").strip()
-INTERNATIONAL_LINK = os.environ.get(
-    "INTERNATIONAL_LINK", "https://t.me/SaulGoodmanOp"
-).strip()
+INTERNATIONAL_LINK = os.environ.get("INTERNATIONAL_LINK", "https://t.me/SaulGoodmanOp").strip()
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
 # ==========================================
 # 🍃 MONGODB ATLAS सेटअप 🍃
 # ==========================================
-MONGO_URI = os.environ.get(
-    "MONGO_URI",
-    "mongodb+srv://itsshadow00_db_user:%40maan147op@cluster0.2ub6iik.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0",
-)
-
-# भविष्य में दूसरे बॉट के लिए यहाँ डेटाबेस नाम बदल सकते हैं (उदा. bot_store_2)
 DB_NAME = os.environ.get("DB_NAME", "bot_store_1")
 
 mongo_client = MongoClient(MONGO_URI)
