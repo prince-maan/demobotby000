@@ -516,7 +516,7 @@ def handle_all_messages(message):
     course = get_course_data(course_id)
     amt_text = course["amount"] if course else ""
 
-    check_msg = bot.send_message(user_id, "⏳ <b>Your payment proof is received. It will be approved within 10 hours...</b>", parse_mode="HTML")
+    check_msg = bot.send_message(user_id, "⏳ <b>Your payment proof is received. It will be approved within 10 minutes...</b>", parse_mode="HTML")
 
     markup = InlineKeyboardMarkup()
     markup.row(
@@ -684,7 +684,7 @@ def handle_buttons(call):
           f"💳 <b>UPI ID:</b> <code>{UPI_ID}</code>\n"
       )
       if course.get("custom_caption"): invoice_text += f"\n📝 {course['custom_caption']}\n"
-      invoice_text += "\n👉 <b>Payment Instructions:</b>\n* Please send the <b>Payment Screenshot</b> here.\n⏳ <i>The payment QR will expire in 10 Hours!</i>"
+      invoice_text += "\n👉 <b>Payment Instructions:</b>\n* Please send the <b>Payment Screenshot</b> here.\n⏳ <i>The payment QR will expire in 10 minutes...!</i>"
 
       markup = InlineKeyboardMarkup()
       if CHAT_LINK: markup.row(InlineKeyboardButton("💬 Chat with Admin", url=CHAT_LINK))
