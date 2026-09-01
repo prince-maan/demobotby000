@@ -24,7 +24,7 @@ from telebot.types import (
 # 🛑 सेटिंग्स और टोकन्स 🛑
 # ==========================================
 BOT_TOKEN = os.environ.get(
-    "BOT_TOKEN", "8986044820:AAFgYI_F_MH0LQT5VX95_umWjkUaMx9cfug"
+    "BOT_TOKEN", "8986044820:AAHbybJywR7I7vbHrfy3p2WWOvlpvEAz5Xw"
 ).strip()
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "8820964089").strip())
 DB_CHANNEL_ID = int(os.environ.get("DB_CHANNEL_ID", "-1003757631353").strip())
