@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import random
 import re
@@ -28,6 +29,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "8994976810"))
 DB_CHANNEL_ID = int(os.environ.get("DB_CHANNEL_ID", "-1003757631353"))
 MONGO_URI = os.environ.get("MONGO_URI")
+MONGO_DB_NAME = os.environ.get("MONGO_DB_NAME", "telegram_store_bot")
 
 UPI_ID = os.environ.get("UPI_ID", "Q520245588@ybl")
 MERCHANT_NAME = os.environ.get("MERCHANT_NAME", "Study Wala")
@@ -36,7 +38,7 @@ SMS_HOOK_SECRET = os.environ.get("SMS_HOOK_SECRET", "84dea856ae8001df1bd2912e083
 CHAT_LINK = os.environ.get("CHAT_LINK", "https://t.me/SaulGoodmanOp")
 INTERNATIONAL_LINK = os.environ.get("INTERNATIONAL_LINK", "https://t.me/SaulGoodmanOp")
 
-QR_EXPIRY_SECONDS = 600              # 10 मिनट (QR एक्सपायरी)
+QR_EXPIRY_SECONDS = 600              # 10 मिनट (QR एक्सपायरी)[cite: 1]
 INACTIVITY_CLEANUP_SECONDS = 86400   # 24 घंटे (इनएक्टिविटी पर चैट डिलीट)
 
 if not BOT_TOKEN:
@@ -61,24 +63,24 @@ def get_ist_time():
 # ==========================================
 try:
     mongo_client = pymongo.MongoClient(MONGO_URI)
-    db = mongo_client.get_database("telegram_store_bot")
+    db = mongo_client.get_database(MONGO_DB_NAME)
     users_col = db["users"]
     courses_col = db["courses"]
     batches_col = db["batches"]
     purchases_col = db["purchases"]
     file_links_col = db["file_links"]
     settings_col = db["settings"]
-    print("✅ MongoDB Connected Successfully!")
+    print(f"✅ MongoDB Connected Successfully! (Database: {MONGO_DB_NAME})")
 except Exception as e:
     print(f"❌ MongoDB Connection Error: {e}")
     sys.exit(1)
 
 
 # ==========================================
-# 📝 HTML FORMATTING HELPER (Bold, Italic Fix)
+# 📝 HTML FORMATTING HELPER (Bold, Italic, Underline Fix)
 # ==========================================
 def get_formatted_text(message):
-    """Telegram formatting (Bold, Italic, Code, Underline) ko preserve karta hai."""
+    """Telegram formatting (Bold, Italic, Underline, Code) ko preserve karta hai."""
     if hasattr(message, "html_text") and message.html_text:
         return message.html_text
     if hasattr(message, "html_caption") and message.html_caption:
@@ -294,7 +296,7 @@ def deliver_course_to_buyer(order, sms_text=None, is_manual=False):
             pass
         return
 
-    # 🔒 PROTECTED CONTENT: Forwarding / Copying Blocked
+    # 🔒 PROTECTED CONTENT: Forwarding, Copying aur Saving Blocked
     try:
         bot.send_message(
             chat_id,
@@ -341,7 +343,17 @@ def deliver_course_to_buyer(order, sms_text=None, is_manual=False):
 # 🛑 कोर्स व स्टार्ट मेन्यू डिलीवरी 🛑
 # ==========================================
 def send_course_to_user(chat_id, course):
-    promo_items = course.get("promo_media", [])
+    # 🛡️ सेफ़ पार्सिंग: पुराना डेटा (JSON String) या नया डेटा (List) दोनों को क्रैश होने से बचाए
+    raw_promo = course.get("promo_media", [])
+    if isinstance(raw_promo, str):
+        try:
+            promo_items = json.loads(raw_promo)
+        except Exception:
+            promo_items = []
+    elif isinstance(raw_promo, list):
+        promo_items = raw_promo
+    else:
+        promo_items = []
 
     markup = InlineKeyboardMarkup()
     markup.row(InlineKeyboardButton(f"🇮🇳 UPI (Pay ₹{course['amount']})", callback_data=f"pay_upi_{course['course_id']}"))
@@ -351,8 +363,8 @@ def send_course_to_user(chat_id, course):
     if CHAT_LINK: btn_row.append(InlineKeyboardButton("💬 Chat with Me", url=CHAT_LINK))
     if btn_row: markup.row(*btn_row)
 
-    media_items = [it for it in promo_items if it.get("type") in ["photo", "video"]]
-    text_items = [it for it in promo_items if it.get("type") == "text"]
+    media_items = [it for it in promo_items if isinstance(it, dict) and it.get("type") in ["photo", "video"]]
+    text_items = [it for it in promo_items if isinstance(it, dict) and it.get("type") == "text"]
 
     first_photo_caption = ""
     for it in media_items:
@@ -398,7 +410,19 @@ def send_course_to_user(chat_id, course):
 
 def send_batch_to_user(chat_id, batch):
     bot.send_message(chat_id, f"📦 <b>{batch['title']}</b>\nAll packs are listed below:", parse_mode="HTML")
-    course_ids = batch.get("course_ids", [])
+    
+    # 🛡️ सेफ़ पार्सिंग बैच के लिए
+    raw_cids = batch.get("course_ids", [])
+    if isinstance(raw_cids, str):
+        try:
+            course_ids = json.loads(raw_cids)
+        except Exception:
+            course_ids = []
+    elif isinstance(raw_cids, list):
+        course_ids = raw_cids
+    else:
+        course_ids = []
+
     for cid in course_ids:
         c_data = courses_col.find_one({"course_id": cid})
         if c_data: send_course_to_user(chat_id, c_data)
@@ -409,7 +433,6 @@ def send_custom_start_menu(chat_id):
     cfg = settings_col.find_one({"_id": "start_menu"})
 
     if not cfg:
-        # डिफ़ॉल्ट स्टार्ट मेन्यू (अगर एडमिन ने अभी तक कस्टमाइज़ नहीं किया है)
         msg_text = (
             "👋 <b>Welcome to our Store!</b>\n\n"
             "Please select a course or pack to get started:"
@@ -573,7 +596,7 @@ def handle_all_messages(message):
     if user_id == ADMIN_ID and user_id in admin_data:
         step = admin_data[ADMIN_ID].get("step")
 
-        # 🎨 स्टार्ट मेन्यू कस्टमाइज़ेशन स्टेप्स
+        # 🎨 स्टार्ट मेन्यू कस्टमाइज़ेशन
         if step == "MENU_CUSTOM_CONTENT":
             media_type, file_id = "text", None
             if message.photo:
@@ -628,7 +651,7 @@ def handle_all_messages(message):
                 bot.send_message(ADMIN_ID, "❌ Format error. Use: <code>Button Name - https://link.com</code>", parse_mode="HTML")
             return
 
-        # 📚 कोर्स क्रिएशन स्टेप्स (Formatting Preserved)
+        # 📚 कोर्स क्रिएशन (Formatting Preserved)
         elif step == "PROMO":
             media_type, file_id = "text", None
             if message.photo: media_type, file_id = "photo", message.photo[-1].file_id
@@ -762,7 +785,7 @@ def handle_buttons(call):
     msg_id = call.message.message_id
     register_activity(chat_id)
 
-    # 🎨 स्टार्ट मेन्यू कस्टमाइज़ेशन कॉलबैक्स
+    # 🎨 स्टार्ट मेन्यू कस्टमाइज़ेशन
     if data == "admin_custom_menu":
         markup = InlineKeyboardMarkup()
         markup.row(InlineKeyboardButton("✏️ Set New Start Menu", callback_data="menu_set_new"))
