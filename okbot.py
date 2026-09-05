@@ -235,9 +235,10 @@ def expire_qr(chat_id, message_id, course_id, amount_key, order_id):
     except Exception: pass
 
     markup = InlineKeyboardMarkup()
+    markup.row(InlineKeyboardButton("✅ Payment Done", callback_data=f"paydone_{order_id}"))
     markup.row(InlineKeyboardButton("📸 Send Screenshot (मैन्युअल वेरिफिकेशन)", callback_data=f"send_ss_{order_id}"))
     markup.row(InlineKeyboardButton("🔄 Regenerate QR", callback_data=f"pay_upi_{course_id}"))
-    try: bot.send_message(chat_id, "⏳ <b>10 मिनट का समय समाप्त हो गया है! / Session Expired!</b>\n\nअगर पैसे कट चुके हैं तो नीचे <b>'📸 Send Screenshot'</b> दबाएं।", reply_markup=markup, parse_mode="HTML")
+    try: bot.send_message(chat_id, "⏳ <b>10 मिनट का समय समाप्त हो गया है! / Session Expired!</b>\n\nअगर पैसे कट चुके हैं तो नीचे <b>'✅ Payment Done'</b> दबाएं, हम दोबारा चेक कर लेंगे।", reply_markup=markup, parse_mode="HTML")
     except Exception: pass
 
 def deliver_course_to_buyer(order, sms_text=None, is_manual=False):
@@ -272,6 +273,15 @@ def deliver_course_to_buyer(order, sms_text=None, is_manual=False):
     purchases_col.insert_one({"user_id": user_id, "username": order.get("user_mention", f"User ({user_id})"), "item_info": f"{course_id} | Rate: ₹{order['amount']} | {verify_type} (order {order_id})", "date": date_now})
     if order.get("offer_id"): offers_col.update_one({"offer_code": order["offer_id"]}, {"$inc": {"used_count": 1}})
     update_channel_order_status(order, "MANUAL_APPROVED" if is_manual else "AUTO_VERIFIED", extra_text=sms_text or "")
+
+    # अगर screenshot पहले ही manual-approval के लिए भेजा जा चुका था, तो वो मैसेज resolve कर दें
+    # ताकि admin दोबारा approve/deny ना कर सके (delayed SMS ने पहले ही deliver कर दिया)
+    manual_msg_id = order.get("manual_msg_id")
+    if manual_msg_id and not is_manual:
+        try:
+            bot.edit_message_reply_markup(DB_CHANNEL_ID, manual_msg_id, reply_markup=None)
+            orig_send_message(DB_CHANNEL_ID, f"✅ <b>ORDER {order_id} ऑटोमैटिक रूप से वेरिफाई और डिलीवर हो गया</b> (delayed SMS मिल गया, manual approval की ज़रूरत नहीं थी)।", parse_mode="HTML")
+        except Exception: pass
 
 
 # ==========================================
@@ -468,8 +478,10 @@ def handle_all_messages(message):
         c_url = f"https://t.me/{message.from_user.username}" if message.from_user.username else f"tg://user?id={user_id}"
         m_admin = InlineKeyboardMarkup().row(InlineKeyboardButton("✅ Approve", callback_data=f"man_appr_{order_id}"), InlineKeyboardButton("❌ Deny", callback_data=f"man_deny_{order_id}")).row(InlineKeyboardButton("💬 Chat with User", url=c_url))
         try:
-            if message.photo: orig_send_photo(DB_CHANNEL_ID, fid, caption=cap, reply_markup=m_admin, parse_mode="HTML")
-            else: orig_send_document(DB_CHANNEL_ID, fid, caption=cap, reply_markup=m_admin, parse_mode="HTML")
+            if message.photo: sent_admin_msg = orig_send_photo(DB_CHANNEL_ID, fid, caption=cap, reply_markup=m_admin, parse_mode="HTML")
+            else: sent_admin_msg = orig_send_document(DB_CHANNEL_ID, fid, caption=cap, reply_markup=m_admin, parse_mode="HTML")
+            orders_col.update_one({"order_id": order_id}, {"$set": {"manual_msg_id": sent_admin_msg.message_id}})
+            if order: order["manual_msg_id"] = sent_admin_msg.message_id
         except Exception as e: orig_send_message(ADMIN_ID, f"❌ Channel error: {e}")
         return
 
@@ -710,6 +722,34 @@ def handle_buttons(call):
         bot.edit_message_text("✅ <b>Reset!</b>", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
         return send_admin_panel(chat_id)
 
+    if data.startswith("paydone_"):
+        oid = data.replace("paydone_", "")
+        order = all_orders_cache.get(oid) or orders_col.find_one({"order_id": oid})
+        if not order:
+            bot.answer_callback_query(call.id, "❌ Order not found.", show_alert=True)
+            return
+
+        # पहले से डिलीवर हो चुका है तो दोबारा कुछ ना करें
+        if order.get("status") in ("COMPLETED_AUTO", "COMPLETED_MANUAL"):
+            bot.answer_callback_query(call.id, "✅ यह ऑर्डर पहले ही डिलीवर हो चुका है।", show_alert=True)
+            return
+
+        bot.answer_callback_query(call.id, "⏳ Checking...", show_alert=False)
+        amt_key = order.get("amount")
+        sms_rec = sms_pool_col.find_one({"amount": amt_key, "status": "UNUSED"})
+        if sms_rec:
+            sms_pool_col.update_one({"_id": sms_rec["_id"]}, {"$set": {"status": "PROCESSED"}})
+            deliver_course_to_buyer(order, sms_text=sms_rec.get("raw_text"), is_manual=False)
+            return
+
+        # SMS पूल में मैच नहीं मिला -> मैन्युअल स्क्रीनशॉट वेरिफिकेशन पर भेजें
+        user_states[chat_id] = {"step": "WAITING_PAYMENT_SS", "order_id": oid}
+        markup = InlineKeyboardMarkup().row(InlineKeyboardButton("📸 Send Screenshot", callback_data=f"send_ss_{oid}"))
+        try:
+            bot.send_message(chat_id, "❌ <b>अभी तक आपकी पेमेंट नहीं मिली है।</b>\n\nकृपया अपना पेमेंट स्क्रीनशॉट भेजें, हम मैन्युअली वेरिफाई कर देंगे।", reply_markup=markup, parse_mode="HTML")
+        except Exception: pass
+        return
+
     if data.startswith("send_ss_"):
         bot.answer_callback_query(call.id)
         user_states[chat_id] = {"step": "WAITING_PAYMENT_SS", "order_id": data.replace("send_ss_", "")}
@@ -719,6 +759,11 @@ def handle_buttons(call):
         oid = data.replace("man_appr_", "")
         o = all_orders_cache.get(oid) or orders_col.find_one({"order_id": oid})
         if not o: return bot.answer_callback_query(call.id, "❌ Order not found.", show_alert=True)
+        if o.get("status") in ("COMPLETED_AUTO", "COMPLETED_MANUAL"):
+            bot.answer_callback_query(call.id, "ℹ️ यह ऑर्डर पहले ही (SMS से) डिलीवर हो चुका है।", show_alert=True)
+            try: bot.edit_message_reply_markup(chat_id, msg_id, reply_markup=None)
+            except Exception: pass
+            return
         deliver_course_to_buyer(o, sms_text="Manual Approval", is_manual=True)
         bot.answer_callback_query(call.id, "✅ Approved!", show_alert=True)
         try:
@@ -730,6 +775,11 @@ def handle_buttons(call):
         oid = data.replace("man_deny_", "")
         o = all_orders_cache.get(oid) or orders_col.find_one({"order_id": oid})
         if not o: return bot.answer_callback_query(call.id, "❌ Not found.", show_alert=True)
+        if o.get("status") in ("COMPLETED_AUTO", "COMPLETED_MANUAL"):
+            bot.answer_callback_query(call.id, "ℹ️ यह ऑर्डर पहले ही (SMS से) डिलीवर हो चुका है, deny नहीं किया जा सकता।", show_alert=True)
+            try: bot.edit_message_reply_markup(chat_id, msg_id, reply_markup=None)
+            except Exception: pass
+            return
         m = InlineKeyboardMarkup().row(InlineKeyboardButton("💬 Contact Admin", url=CHAT_LINK)) if CHAT_LINK else None
         try: bot.send_message(o["chat_id"], f"❌ <b>Payment Failed!</b>\nऑर्डर <code>{oid}</code> रिजेक्ट कर दिया गया है।", reply_markup=m, parse_mode="HTML")
         except Exception: pass
@@ -928,7 +978,7 @@ def sms_webhook(secret):
         if len(cands) == 1: order = pending_orders.pop(cands[0])
         else: amb = len(cands) > 1
 
-    if not order: order = orders_col.find_one({"amount": f_round, "status": "PENDING"})
+    if not order: order = orders_col.find_one({"amount": f_round, "status": {"$in": ["PENDING", "EXPIRED"]}})
     
     if order:
         sms_pool_col.update_one({"amount": f_round, "status": "UNUSED"}, {"$set": {"status": "PROCESSED"}})
