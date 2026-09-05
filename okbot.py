@@ -249,9 +249,13 @@ def deliver_course_to_buyer(order, sms_text=None, is_manual=False):
 
     with pending_lock: pending_orders.pop(order.get("amount"), None)
     if user_id in user_states and user_states[user_id].get("order_id") == order_id: del user_states[user_id]
-    if chat_id in user_qr_messages:
-        try: bot.delete_message(chat_id, user_qr_messages[chat_id])
+    
+    # QR Delete logic (Updated)
+    qr_msg_id = user_qr_messages.get(chat_id) or order.get("qr_msg_id")
+    if qr_msg_id:
+        try: bot.delete_message(chat_id, qr_msg_id)
         except Exception: pass
+    if chat_id in user_qr_messages:
         del user_qr_messages[chat_id]
 
     if not course:
@@ -791,7 +795,7 @@ def handle_buttons(call):
                 return deliver_course_to_buyer(o_data, sms_text=sms_rec.get("raw_text"), is_manual=False)
 
             qr_img_bio, clean_amt = generate_upi_qr(amt_key, order_id)
-            inv = f"👤 <b>User:</b> {call.from_user.first_name}\n🆔 <b>Order:</b> <code>{order_id}</code>\n📅 <b>Time:</b> {get_ist_time()}\n💰 <b>Amount:</b> ₹{clean_amt}\n💳 <b>UPI:</b> <code>{UPI_ID}</code>\n"
+            inv = f"👤 <b>User:</b> {call.from_user.first_name}\n🆔 <b>Order:</b> <code>{order_id}</code>\n📅 <b>Time:</b> {get_ist_time()}\n💰 <b>Amount:</b> ₹{clean_amt}\n"
             if disc_pct: inv += f"🎉 <i>Discount: {disc_pct}% OFF (₹{base_price} ➔ ₹{clean_amt})</i>\n"
             if course.get("custom_caption"): inv += f"\n📝 {course['custom_caption']}\n"
             inv += f"\n⚠️ <b>Exact Amount Pay Karein.</b>\n⏳ <i>QR {QR_EXPIRY_SECONDS // 60} min mein expire hoga.</i>"
@@ -800,6 +804,9 @@ def handle_buttons(call):
             if CHAT_LINK: m.row(InlineKeyboardButton("💬 Chat with Admin", url=CHAT_LINK))
             sent_msg = bot.send_photo(chat_id, photo=qr_img_bio, caption=inv, reply_markup=m, parse_mode="HTML")
             user_qr_messages[chat_id] = sent_msg.message_id
+            
+            # QR मैसेज की ID डेटाबेस में सेव करें
+            orders_col.update_one({"order_id": order_id}, {"$set": {"qr_msg_id": sent_msg.message_id}})
 
             threading.Timer(QR_EXPIRY_SECONDS, expire_qr, args=(chat_id, sent_msg.message_id, course_id, amt_key, order_id)).start()
             threading.Thread(target=background_order_checker, args=(order_id, amt_key), daemon=True).start()
