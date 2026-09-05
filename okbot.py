@@ -236,9 +236,9 @@ def expire_qr(chat_id, message_id, course_id, amount_key, order_id):
 
     markup = InlineKeyboardMarkup()
     markup.row(InlineKeyboardButton("✅ Payment Done", callback_data=f"paydone_{order_id}"))
-    markup.row(InlineKeyboardButton("📸 Send Screenshot (मैन्युअल वेरिफिकेशन)", callback_data=f"send_ss_{order_id}"))
+    markup.row(InlineKeyboardButton("📸 Send Screenshot (Manual Verification)", callback_data=f"send_ss_{order_id}"))
     markup.row(InlineKeyboardButton("🔄 Regenerate QR", callback_data=f"pay_upi_{course_id}"))
-    try: bot.send_message(chat_id, "⏳ <b>10 मिनट का समय समाप्त हो गया है! / Session Expired!</b>\n\nअगर पैसे कट चुके हैं तो नीचे <b>'✅ Payment Done'</b> दबाएं, हम दोबारा चेक कर लेंगे।", reply_markup=markup, parse_mode="HTML")
+    try: bot.send_message(chat_id, "⏳ <b>Session Expired! Time is up.</b>\n<i>Session khatam ho gaya hai!</i>\n\nIf your payment has been deducted, tap <b>'✅ Payment Done'</b> below and we'll re-check it.\n<i>Agar paise kat chuke hain to neeche '✅ Payment Done' dabayein, hum dobara check kar lenge.</i>", reply_markup=markup, parse_mode="HTML")
     except Exception: pass
 
 def deliver_course_to_buyer(order, sms_text=None, is_manual=False):
@@ -393,18 +393,18 @@ def start_command(message):
     if param.startswith("off_"):
         offer = offers_col.find_one({"offer_code": param})
         if not offer:
-            bot.send_message(user_id, "❌ <b>यह ऑफर अमान्य है या समाप्त हो चुका है।</b>", parse_mode="HTML")
+            bot.send_message(user_id, "❌ <b>This offer is invalid or has expired.</b>\n<i>Yeh offer invalid hai ya expire ho chuka hai.</i>", parse_mode="HTML")
             return send_custom_start_menu(user_id)
         now_ts = time.time()
         if offer.get("expires_at_ts") and now_ts > offer["expires_at_ts"]:
-            bot.send_message(user_id, "⏳ <b>यह ऑफर समाप्त (Expired) हो चुका है!</b>", parse_mode="HTML")
+            bot.send_message(user_id, "⏳ <b>This offer has expired!</b>\n<i>Yeh offer expire ho chuka hai!</i>", parse_mode="HTML")
             return send_custom_start_menu(user_id)
         if offer.get("max_users", -1) != -1 and offer.get("used_count", 0) >= offer["max_users"]:
-            bot.send_message(user_id, "⚠️ <b>इस ऑफर की अधिकतम सीमा समाप्त हो चुकी है!</b>", parse_mode="HTML")
+            bot.send_message(user_id, "⚠️ <b>This offer has reached its maximum claim limit!</b>\n<i>Is offer ki maximum limit khatam ho chuki hai!</i>", parse_mode="HTML")
             return send_custom_start_menu(user_id)
 
         users_col.update_one({"user_id": user_id}, {"$set": {"active_offer": offer}}, upsert=True)
-        bot.send_message(user_id, f"🎉 <b>बधाई हो! {offer['discount_percent']}% का डिस्काउंट एक्टिवेट हो गया है!</b>\n\nयह छूट {'सभी कोर्सेज' if offer['target_type'] == 'all' else 'विशिष्ट कोर्स (' + offer['target_course_id'] + ')'} पर लागू होगी।", parse_mode="HTML")
+        bot.send_message(user_id, f"🎉 <b>Congrats! {offer['discount_percent']}% discount activated!</b>\n<i>Badhai ho! {offer['discount_percent']}% ka discount activate ho gaya hai!</i>\n\nThis will apply on {'all courses' if offer['target_type'] == 'all' else 'a specific course (' + offer['target_course_id'] + ')'}.\n<i>Yeh discount {'sabhi courses' if offer['target_type'] == 'all' else 'ek specific course (' + offer['target_course_id'] + ')'} par lagu hoga.</i>", parse_mode="HTML")
         if offer["target_type"] == "single":
             c = courses_col.find_one({"course_id": offer["target_course_id"]})
             if c: send_course_to_user(user_id, c)
@@ -465,10 +465,10 @@ def handle_all_messages(message):
         order_id = user_states[user_id].get("order_id")
         order = all_orders_cache.get(order_id) or orders_col.find_one({"order_id": order_id})
         if not message.photo and not message.document:
-            bot.send_message(user_id, "❌ <b>कृपया फोटो या डॉक्यूमेंट में स्क्रीनशॉट भेजें।</b>", parse_mode="HTML")
+            bot.send_message(user_id, "❌ <b>Please send your screenshot as a photo or document.</b>\n<i>Kripya screenshot photo ya document mein bhejein.</i>", parse_mode="HTML")
             return
         fid = message.photo[-1].file_id if message.photo else message.document.file_id
-        bot.send_message(user_id, "⏳ <b>वेरिफिकेशन पेंडिंग है...</b>\n\nस्क्रीनशॉट एडमिन को भेज दिया गया है।", parse_mode="HTML")
+        bot.send_message(user_id, "⏳ <b>Verification pending...</b>\n<i>Verification pending hai...</i>\n\nYour screenshot has been sent to admin.\n<i>Aapka screenshot admin ko bhej diya gaya hai.</i>", parse_mode="HTML")
         del user_states[user_id]
 
         u_str = f"@{message.from_user.username}" if message.from_user.username else "No Username"
@@ -731,7 +731,7 @@ def handle_buttons(call):
 
         # पहले से डिलीवर हो चुका है तो दोबारा कुछ ना करें
         if order.get("status") in ("COMPLETED_AUTO", "COMPLETED_MANUAL"):
-            bot.answer_callback_query(call.id, "✅ यह ऑर्डर पहले ही डिलीवर हो चुका है।", show_alert=True)
+            bot.answer_callback_query(call.id, "✅ This order has already been delivered. / Yeh order pehle hi deliver ho chuka hai.", show_alert=True)
             return
 
         bot.answer_callback_query(call.id, "⏳ Checking...", show_alert=False)
@@ -746,14 +746,14 @@ def handle_buttons(call):
         user_states[chat_id] = {"step": "WAITING_PAYMENT_SS", "order_id": oid}
         markup = InlineKeyboardMarkup().row(InlineKeyboardButton("📸 Send Screenshot", callback_data=f"send_ss_{oid}"))
         try:
-            bot.send_message(chat_id, "❌ <b>अभी तक आपकी पेमेंट नहीं मिली है।</b>\n\nकृपया अपना पेमेंट स्क्रीनशॉट भेजें, हम मैन्युअली वेरिफाई कर देंगे।", reply_markup=markup, parse_mode="HTML")
+            bot.send_message(chat_id, "❌ <b>Your payment hasn't been received yet.</b>\n<i>Abhi tak aapki payment nahi mili hai.</i>\n\nPlease send your payment screenshot, we'll verify it manually.\n<i>Kripya apna payment screenshot bhejein, hum manually verify kar denge.</i>", reply_markup=markup, parse_mode="HTML")
         except Exception: pass
         return
 
     if data.startswith("send_ss_"):
         bot.answer_callback_query(call.id)
         user_states[chat_id] = {"step": "WAITING_PAYMENT_SS", "order_id": data.replace("send_ss_", "")}
-        bot.send_message(chat_id, "📸 <b>कृपया अपनी पेमेंट का स्क्रीनशॉट भेजें।</b>", parse_mode="HTML")
+        bot.send_message(chat_id, "📸 <b>Please send your payment screenshot.</b>\n<i>Kripya apni payment ka screenshot bhejein.</i>", parse_mode="HTML")
         return
     if data.startswith("man_appr_"):
         oid = data.replace("man_appr_", "")
@@ -781,7 +781,7 @@ def handle_buttons(call):
             except Exception: pass
             return
         m = InlineKeyboardMarkup().row(InlineKeyboardButton("💬 Contact Admin", url=CHAT_LINK)) if CHAT_LINK else None
-        try: bot.send_message(o["chat_id"], f"❌ <b>Payment Failed!</b>\nऑर्डर <code>{oid}</code> रिजेक्ट कर दिया गया है।", reply_markup=m, parse_mode="HTML")
+        try: bot.send_message(o["chat_id"], f"❌ <b>Payment Failed!</b>\nOrder <code>{oid}</code> has been rejected.\n<i>Order <code>{oid}</code> reject kar diya gaya hai.</i>", reply_markup=m, parse_mode="HTML")
         except Exception: pass
         bot.answer_callback_query(call.id, "❌ Rejected.", show_alert=True)
         try:
@@ -848,7 +848,7 @@ def handle_buttons(call):
             inv = f"👤 <b>User:</b> {call.from_user.first_name}\n🆔 <b>Order:</b> <code>{order_id}</code>\n📅 <b>Time:</b> {get_ist_time()}\n💰 <b>Amount:</b> ₹{clean_amt}\n"
             if disc_pct: inv += f"🎉 <i>Discount: {disc_pct}% OFF (₹{base_price} ➔ ₹{clean_amt})</i>\n"
             if course.get("custom_caption"): inv += f"\n📝 {course['custom_caption']}\n"
-            inv += f"\n⚠️ <b>Exact Amount Pay Karein.</b>\n⏳ <i>QR {QR_EXPIRY_SECONDS // 60} min mein expire hoga.</i>"
+            inv += f"\n⚠️ <b>Exact Amount Pay Karein.</b>\n⏳ <i>QR {QR_EXPIRY_SECONDS // 60} min mein expire hoga.</i>\n\n🤖 <i>auto-verifies your payment.</i>\n🤖 <i>aap payment kijiye aapko mil jeaega</i>"
 
             m = InlineKeyboardMarkup()
             if CHAT_LINK: m.row(InlineKeyboardButton("💬 Chat with Admin", url=CHAT_LINK))
