@@ -287,7 +287,6 @@ def handle_join_request(message):
             break
             
     if not course: 
-        # यह लिंक मेरे बॉट ने नहीं बनाई थी (यानी ये दोस्त के बॉट की लिंक है)! 
         return
         
     course_id = course["course_id"]
@@ -298,14 +297,14 @@ def handle_join_request(message):
         try: 
             bot.approve_chat_join_request(chat_id, user_id)
             channel_logs_col.insert_one({"user_id": user_id, "course_id": course_id, "status": "APPROVED", "date": now_str})
-            orig_send_message(user_id, f"✅ <b>Request Approved!</b>\nWelcome to the channel.", parse_mode="HTML")
+            orig_send_message(user_id, f"✅ <b>Request Approved!</b>\nWelcome to the Private Group/Channel.", parse_mode="HTML")
         except Exception: pass
     else:
         try:
             bot.decline_chat_join_request(chat_id, user_id)
             channel_logs_col.insert_one({"user_id": user_id, "course_id": course_id, "status": "DENIED", "date": now_str})
             orig_send_message(user_id, f"❌ <b>Access Denied!</b>\nYou haven't purchased this pack yet. Please buy it from the bot first.", parse_mode="HTML")
-            orig_send_message(ADMIN_ID, f"⚠️ <b>Unauthorized Access Blocked</b>\nUser: <a href='tg://user?id={user_id}'>{user_id}</a> tried to join without payment.\nChannel: <code>{chat_id}</code>", parse_mode="HTML")
+            orig_send_message(ADMIN_ID, f"⚠️ <b>Unauthorized Access Blocked</b>\nUser: <a href='tg://user?id={user_id}'>{user_id}</a> tried to join without payment.\nChannel/Group: <code>{chat_id}</code>", parse_mode="HTML")
         except Exception: pass
 
 # ==========================================
@@ -575,7 +574,7 @@ def handle_all_messages(message):
             return
         elif step == "CAPTION":
             admin_data[ADMIN_ID]["caption"], admin_data[ADMIN_ID]["step"] = get_formatted_text(message), "COURSE_TYPE"
-            m = InlineKeyboardMarkup().row(InlineKeyboardButton("📝 Text / Secret Link", callback_data="ctype_text"), InlineKeyboardButton("📢 Private Channel", callback_data="ctype_channel"))
+            m = InlineKeyboardMarkup().row(InlineKeyboardButton("📝 Text / Secret Link", callback_data="ctype_text"), InlineKeyboardButton("📢 Private Channel/Group", callback_data="ctype_channel"))
             bot.send_message(ADMIN_ID, "✅ <b>Caption saved!</b>\nWhat will the user get after payment?", reply_markup=m, parse_mode="HTML")
             return
         elif step == "SECRET":
@@ -592,12 +591,24 @@ def handle_all_messages(message):
                 bot.send_message(ADMIN_ID, f"✅ <b>Pack saved!</b>", reply_markup=m, parse_mode="HTML")
             return
         elif step == "CHANNEL_ID":
-            if not message.forward_from_chat or message.forward_from_chat.type != "channel":
-                return bot.send_message(ADMIN_ID, "❌ Please forward a message from the private channel.")
-            channel_id = message.forward_from_chat.id
+            channel_id = None
+            if message.forward_from_chat:
+                channel_id = message.forward_from_chat.id
+            elif message.text:
+                text = message.text.strip()
+                # t.me/c/12345/1 format parsing
+                match = re.search(r"t\.me/c/(\d+)", text)
+                if match:
+                    channel_id = int(f"-100{match.group(1)}")
+                elif text.startswith("-100") and text.replace("-", "").isdigit():
+                    channel_id = int(text)
+            
+            if not channel_id:
+                return bot.send_message(ADMIN_ID, "❌ कृपया किसी Private Channel/Group की लिंक भेजें (जैसे https://t.me/c/123456.../1) या मैसेज फॉरवर्ड करें।")
+            
             try:
                 link = bot.create_chat_invite_link(channel_id, creates_join_request=True)
-                secret_text = f"👉 <b>Click here to join the channel:</b>\n{link.invite_link}"
+                secret_text = f"👉 <b>Click here to join the Group/Channel:</b>\n{link.invite_link}"
                 cid = "c_" + str(uuid.uuid4())[:6]
                 courses_col.update_one({"course_id": cid}, {"$set": {
                     "course_id": cid, "promo_media": admin_data[ADMIN_ID]["promo"], "amount": admin_data[ADMIN_ID]["amount"],
@@ -614,7 +625,7 @@ def handle_all_messages(message):
                     m = InlineKeyboardMarkup().row(InlineKeyboardButton("➕ Add Another", callback_data="batch_add_next")).row(InlineKeyboardButton("✅ Finish Batch", callback_data="batch_finish"))
                     bot.send_message(ADMIN_ID, f"✅ <b>Pack saved!</b>", reply_markup=m, parse_mode="HTML")
             except Exception as e:
-                bot.send_message(ADMIN_ID, f"❌ Error: Make sure the bot is an Admin in the channel first! ({e})")
+                bot.send_message(ADMIN_ID, f"❌ Error: Make sure the bot is an Admin in the Channel/Group first! ({e})")
             return
         elif step == "TITLE":
             admin_data[ADMIN_ID]["title"], admin_data[ADMIN_ID]["step"], admin_data[ADMIN_ID]["promo"] = message.text.strip(), "PROMO", []
@@ -664,11 +675,11 @@ def handle_buttons(call):
         return
     if data == "ctype_channel":
         admin_data[ADMIN_ID]["step"] = "CHANNEL_ID"
-        bot.edit_message_text("📢 <b>Forward any message from the private channel to me:</b>\n<i>(Make sure I am added as an Admin in that channel first!)</i>", chat_id, msg_id, parse_mode="HTML")
+        bot.edit_message_text("📢 <b>Forward a message OR send a Private Post Link (e.g. https://t.me/c/123...):</b>\n<i>(Make sure I am an Admin in that Channel/Group first!)</i>", chat_id, msg_id, parse_mode="HTML")
         return
     if data == "skip_caption" and ADMIN_ID in admin_data:
         admin_data[ADMIN_ID]["caption"], admin_data[ADMIN_ID]["step"] = "", "COURSE_TYPE"
-        m = InlineKeyboardMarkup().row(InlineKeyboardButton("📝 Text / Secret Link", callback_data="ctype_text"), InlineKeyboardButton("📢 Private Channel", callback_data="ctype_channel"))
+        m = InlineKeyboardMarkup().row(InlineKeyboardButton("📝 Text / Secret Link", callback_data="ctype_text"), InlineKeyboardButton("📢 Private Channel/Group", callback_data="ctype_channel"))
         bot.edit_message_text("✅ <b>What will the user get after payment?</b>", chat_id=chat_id, message_id=msg_id, reply_markup=m, parse_mode="HTML")
         return
     if data == "admin_create_offer":
@@ -901,7 +912,7 @@ def handle_buttons(call):
                     sent = orig_send_media_group(uid, m_group)
                     if btns or any(i["type"] == "text" for i in m_items): bot.send_message(uid, "👇", reply_markup=m, parse_mode="HTML")
                 success += 1
-                time.sleep(0.05) # Prevent Telegram limits
+                time.sleep(0.05)
             except Exception: pass
         bot.send_message(ADMIN_ID, f"✅ <b>Broadcast Complete!</b> ({success} users).", parse_mode="HTML")
         del admin_data[ADMIN_ID]
@@ -1083,7 +1094,7 @@ def api_broadcast():
         for u in users_col.find():
             try: 
                 bot.send_message(u["user_id"], msg, reply_markup=markup, parse_mode="HTML")
-                time.sleep(0.05) # Prevent Telegram flood wait & Render CPU spike
+                time.sleep(0.05)
             except Exception: pass
     threading.Thread(target=run_bc).start()
     return jsonify({"status": "success"})
@@ -1185,7 +1196,7 @@ async function load(){
       <p style="font-size:12px; color:var(--muted)">Use HTML tags: &lt;b&gt;<b>Bold</b>&lt;/b&gt;, &lt;i&gt;<i>Italic</i>&lt;/i&gt;</p>
       <textarea id="bc_msg" rows="5" placeholder="Type your message here..."></textarea>
       <p style="font-size:12px; color:var(--muted); margin-top:10px;">Buttons (Optional) - Format: <b>Name - Link</b> (One per line)</p>
-      <textarea id="bc_btns" rows="3" placeholder="My Youtube - https://youtube.com\nChat with me - https://t.me/yourid"></textarea>
+      <textarea id="bc_btns" rows="3" placeholder="My Youtube - https://youtube.com\\nChat with me - https://t.me/yourid"></textarea>
       <button onclick="sendBc()">🚀 Send to All Users</button></div>`;
   } else if(curTab==="logs"){
     r=await fetch("/dashboard/api/channel-logs"); let o=await r.json();
