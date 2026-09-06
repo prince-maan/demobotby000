@@ -39,7 +39,8 @@ INTERNATIONAL_LINK = os.environ.get("INTERNATIONAL_LINK")
 # 🔒 Content Protection Toggle (Render से True/False कंट्रोल करें)
 PROTECT_CONTENT = os.environ.get("PROTECT_CONTENT", "False").strip().lower() == "true"
 
-QR_EXPIRY_SECONDS = 600              # 10 मिनट
+# 🕐 QR Expiry Time — Render पर "QR_EXPIRY_MINUTES" env variable से control करें (default 10 min)
+QR_EXPIRY_SECONDS = int(os.environ.get("QR_EXPIRY_MINUTES", "10")) * 60
 INACTIVITY_CLEANUP_SECONDS = 86400   # 24 घंटे
 
 # ज़रूरी वेरिएबल्स चेक करें
@@ -222,23 +223,35 @@ def update_channel_order_status(order, status_type, extra_text=""):
     except Exception: pass
 
 def expire_qr(chat_id, message_id, course_id, amount_key, order_id):
-    order = all_orders_cache.get(order_id)
-    if order and order.get("status") == "PENDING":
-        order["status"] = "EXPIRED"
-        orders_col.update_one({"order_id": order_id}, {"$set": {"status": "EXPIRED"}})
-        update_channel_order_status(order, "EXPIRED")
+    order = all_orders_cache.get(order_id) or orders_col.find_one({"order_id": order_id})
+    if not order: return
+
+    # पहले से ही deliver हो चुका है (last-moment SMS आ गया था) -> कुछ मत करो
+    if order.get("status") in ("COMPLETED_AUTO", "COMPLETED_MANUAL"):
+        return
+
+    # ⏳ Expire होने से ठीक पहले एक आखिरी बार SMS पूल में match चेक करें
+    sms_rec = sms_pool_col.find_one({"amount": amount_key, "status": "UNUSED"})
+    if sms_rec:
+        sms_pool_col.update_one({"_id": sms_rec["_id"]}, {"$set": {"status": "PROCESSED"}})
+        deliver_course_to_buyer(order, sms_text=sms_rec.get("raw_text"), is_manual=False)
+        return
+
+    # ❌ Payment match नहीं मिली -> order को EXPIRED मार्क करें
+    order["status"] = "EXPIRED"
+    orders_col.update_one({"order_id": order_id}, {"$set": {"status": "EXPIRED"}})
+    update_channel_order_status(order, "EXPIRED")
 
     with pending_lock: pending_orders.pop(amount_key, None)
-    if chat_id in user_states and user_states[chat_id].get("amount_key") == amount_key: del user_states[chat_id]
     if chat_id in user_qr_messages and user_qr_messages[chat_id] == message_id: del user_qr_messages[chat_id]
     try: bot.delete_message(chat_id, message_id)
     except Exception: pass
 
-    markup = InlineKeyboardMarkup()
-    markup.row(InlineKeyboardButton("✅ Payment Done", callback_data=f"paydone_{order_id}"))
-    markup.row(InlineKeyboardButton("📸 Send Screenshot (Manual Verification)", callback_data=f"send_ss_{order_id}"))
-    markup.row(InlineKeyboardButton("🔄 Regenerate QR", callback_data=f"pay_upi_{course_id}"))
-    try: bot.send_message(chat_id, "⏳ <b>Session Expired! Time is up.</b>\n<i>Session khatam ho gaya hai!</i>\n\nIf your payment has been deducted, tap <b>'✅ Payment Done'</b> below and we'll re-check it.\n<i>Agar paise kat chuke hain to neeche '✅ Payment Done' dabayein, hum dobara check kar lenge.</i>", reply_markup=markup, parse_mode="HTML")
+    # 📸 सीधा screenshot माँगें, कोई button नहीं — user जो भी अगली photo/document भेजेगा
+    # वो अपने-आप admin को manual approval के लिए चला जाएगा
+    user_states[chat_id] = {"step": "WAITING_PAYMENT_SS", "order_id": order_id}
+    try:
+        bot.send_message(chat_id, "⏳ <b>Time's up!</b>\n\n📸 Apna <b>payment screenshot</b> neeche bhej dijiye.", parse_mode="HTML")
     except Exception: pass
 
 def deliver_course_to_buyer(order, sms_text=None, is_manual=False):
@@ -287,8 +300,10 @@ def deliver_course_to_buyer(order, sms_text=None, is_manual=False):
 # ==========================================
 # ⏱️ बैकग्राउंड चेकर
 # ==========================================
-def background_order_checker(order_id, amount_str):
-    for _ in range(30):
+def background_order_checker(order_id, amount_str, max_seconds=None):
+    total = max_seconds if max_seconds is not None else QR_EXPIRY_SECONDS
+    iterations = max(1, total // 20)
+    for _ in range(iterations):
         time.sleep(20)
         order = all_orders_cache.get(order_id)
         if not order or order.get("status") != "PENDING": break
@@ -991,7 +1006,41 @@ def sms_webhook(secret):
         return "ambiguous", 200
     return "saved_to_pool", 200
 
+# ==========================================
+# 🔁 RESTART RECOVERY — server restart/sleep के बाद pending orders वापस लोड करें
+# ==========================================
+def restore_pending_orders():
+    restored, expired_now = 0, 0
+    for order in orders_col.find({"status": "PENDING"}):
+        order_id = order["order_id"]
+        amt_key = order.get("amount")
+        chat_id = order.get("chat_id")
+        created_ts = order.get("created_at", 0)
+        elapsed = time.time() - created_ts if created_ts else QR_EXPIRY_SECONDS
+        remaining = QR_EXPIRY_SECONDS - elapsed
+
+        with pending_lock:
+            pending_orders[amt_key] = order
+            all_orders_cache[order_id] = order
+
+        qr_msg_id = order.get("qr_msg_id")
+
+        if remaining > 0:
+            # अभी भी valid है -> बचे हुए समय के लिए timer + checker फिर से शुरू करें
+            threading.Timer(remaining, expire_qr, args=(chat_id, qr_msg_id, order["course_id"], amt_key, order_id)).start()
+            threading.Thread(target=background_order_checker, args=(order_id, amt_key, int(remaining)), daemon=True).start()
+            restored += 1
+        else:
+            # समय पहले ही निकल चुका है (लंबे समय तक server down रहा था) -> तुरंत expire करके screenshot माँग लें
+            threading.Thread(target=expire_qr, args=(chat_id, qr_msg_id, order["course_id"], amt_key, order_id), daemon=True).start()
+            expired_now += 1
+
+    if restored or expired_now:
+        print(f"🔁 Restart Recovery: {restored} orders resumed, {expired_now} orders expired immediately.")
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
+    restore_pending_orders()
     threading.Thread(target=lambda: bot.infinity_polling(skip_pending=True), daemon=True).start()
     app.run(host="0.0.0.0", port=port)
