@@ -79,7 +79,7 @@ try:
     orders_col = db["orders"]
     sms_pool_col = db["sms_pool"]
     offers_col = db["offers"]
-    channel_logs_col = db["channel_logs"]  # NEW: For tracking Approved/Denied channel joins
+    channel_logs_col = db["channel_logs"]
 
     try:
         sms_pool_col.create_index("created_at_dt", expireAfterSeconds=SMS_POOL_TTL_HOURS * 3600)
@@ -272,17 +272,22 @@ def background_order_checker(order_id, amount_str, max_seconds=None):
             break
 
 # ==========================================
-# 🛑 GATEKEEPER: CHANNEL JOIN REQUEST HANDLER
+# 🛑 GATEKEEPER: CHANNEL JOIN REQUEST HANDLER (CROSS-OVER SAFE)
 # ==========================================
 @bot.chat_join_request_handler()
 def handle_join_request(message):
     chat_id = message.chat.id
     user_id = message.from_user.id
+    used_link = message.invite_link.invite_link if message.invite_link else ""
     
-    course = courses_col.find_one({"channel_id": chat_id})
-    if not course:
-        try: bot.decline_chat_join_request(chat_id, user_id)
-        except Exception: pass
+    course = None
+    for c in courses_col.find({"channel_id": chat_id}):
+        if c.get("secret_text", "") and used_link in c.get("secret_text", ""):
+            course = c
+            break
+            
+    if not course: 
+        # यह लिंक मेरे बॉट ने नहीं बनाई थी (यानी ये दोस्त के बॉट की लिंक है)! 
         return
         
     course_id = course["course_id"]
@@ -853,7 +858,7 @@ def handle_buttons(call):
         if d and d.get("course_ids"):
             bid = "b_" + str(uuid.uuid4())[:6]
             batches_col.update_one({"batch_id": bid}, {"$set": {"batch_id": bid, "title": d["title"], "course_ids": d["course_ids"]}}, upsert=True)
-            bot.edit_message_text(f"🎉 <b>Batch Created!</b>\n👉 <code>https://t.me/{bot.get_me().username}?start={bid}</code>", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
+            bot.edit_message_text(f"🎉 <b>Batch Created!</b>\n👉 <code>https://t.me/{BOT_USERNAME}?start={bid}</code>", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
             del admin_data[ADMIN_ID]
             send_admin_panel(ADMIN_ID)
     elif data == "admin_user_info":
@@ -896,6 +901,7 @@ def handle_buttons(call):
                     sent = orig_send_media_group(uid, m_group)
                     if btns or any(i["type"] == "text" for i in m_items): bot.send_message(uid, "👇", reply_markup=m, parse_mode="HTML")
                 success += 1
+                time.sleep(0.05) # Prevent Telegram limits
             except Exception: pass
         bot.send_message(ADMIN_ID, f"✅ <b>Broadcast Complete!</b> ({success} users).", parse_mode="HTML")
         del admin_data[ADMIN_ID]
@@ -906,7 +912,7 @@ def handle_buttons(call):
     elif data == "ftl_finish":
         fid = "f_" + str(uuid.uuid4())[:6]
         file_links_col.update_one({"file_code": fid}, {"$set": {"file_code": fid, "media_data": admin_data[ADMIN_ID].get("media", []), "button_data": admin_data[ADMIN_ID].get("buttons", [])}}, upsert=True)
-        bot.send_message(ADMIN_ID, f"🎉 <b>Link Created!</b>\n👉 <code>https://t.me/{bot.get_me().username}?start={fid}</code>", parse_mode="HTML")
+        bot.send_message(ADMIN_ID, f"🎉 <b>Link Created!</b>\n👉 <code>https://t.me/{BOT_USERNAME}?start={fid}</code>", parse_mode="HTML")
         del admin_data[ADMIN_ID]
         send_admin_panel(ADMIN_ID)
 
@@ -916,6 +922,7 @@ def handle_buttons(call):
 app = Flask(__name__)
 AMOUNT_RE_DECIMAL = re.compile(r"(?:Rs\.?|₹|INR)\s?([\d,]+\.\d{2})", re.IGNORECASE)
 AMOUNT_RE_INT = re.compile(r"(?:Rs\.?|₹|INR)\s?([\d,]+)(?!\.\d)", re.IGNORECASE)
+BOT_USERNAME = "your_bot" 
 
 @app.route("/")
 def home(): return "Telegram Bot API Running."
@@ -1049,7 +1056,8 @@ def api_offers():
     now = time.time()
     for o in offers_col.find().sort("created_at_ts", -1):
         status = "Active" if o["expires_at_ts"] > now and (o["max_users"] == -1 or o["used_count"] < o["max_users"]) else "Expired"
-        out.append({"offer_code": o["offer_code"], "discount": o["discount_percent"], "target": o["target_type"], "course": o["target_course_id"], "used": o["used_count"], "max": o["max_users"], "expires": o["expires_str"], "status": status})
+        link = f"https://t.me/{BOT_USERNAME}?start={o['offer_code']}"
+        out.append({"offer_code": o["offer_code"], "discount": o["discount_percent"], "target": o["target_type"], "course": o["target_course_id"], "used": o["used_count"], "max": o["max_users"], "expires": o["expires_str"], "status": status, "link": link})
     return jsonify(out)
 
 @app.route("/dashboard/api/offers/<offer_code>", methods=["DELETE"])
@@ -1062,10 +1070,20 @@ def api_delete_offer(offer_code):
 @require_auth
 def api_broadcast():
     msg = request.json.get("message")
+    btns = request.json.get("buttons", [])
     if not msg: return jsonify({"error": "Empty message"}), 400
+    
+    markup = telebot.types.InlineKeyboardMarkup()
+    for b in btns:
+        if b.get("text") and b.get("url"):
+            markup.add(telebot.types.InlineKeyboardButton(b["text"], url=b["url"]))
+    if not markup.keyboard: markup = None
+
     def run_bc():
         for u in users_col.find():
-            try: bot.send_message(u["user_id"], msg, parse_mode="HTML")
+            try: 
+                bot.send_message(u["user_id"], msg, reply_markup=markup, parse_mode="HTML")
+                time.sleep(0.05) # Prevent Telegram flood wait & Render CPU spike
             except Exception: pass
     threading.Thread(target=run_bc).start()
     return jsonify({"status": "success"})
@@ -1160,12 +1178,14 @@ async function load(){
       <label>Max Users (0 for unlimited):</label><input type="number" id="off_max" value="0">
       <label>Active Hours:</label><input type="number" id="off_hrs" value="24">
       <button onclick="createOffer()">Create Offer</button></div>`;
-    let listHTML = o.map(x=>`<div class="item ${x.status==='Active'?'ok':'expired'}"><div class="main"><div class="name">${x.discount}% OFF - <span class="mono">${x.offer_code}</span></div><div class="sub">Target: ${x.target} ${x.course?'('+x.course+')':''} | Used: ${x.used}/${x.max==-1?'∞':x.max} | Exp: ${x.expires}</div></div><div><button class="action-btn danger-btn" onclick="delOffer('${x.offer_code}')">🗑</button></div></div>`).join("");
+    let listHTML = o.map(x=>`<div class="item ${x.status==='Active'?'ok':'expired'}"><div class="main"><div class="name">${x.discount}% OFF - <span class="mono">${x.offer_code}</span></div><div class="sub">🔗 Link: <a href="${x.link}" target="_blank" style="color:#3ED9A0">${x.link}</a></div><div class="sub">Target: ${x.target} ${x.course?'('+x.course+')':''} | Used: ${x.used}/${x.max==-1?'∞':x.max} | Exp: ${x.expires}</div></div><div><button class="action-btn danger-btn" onclick="delOffer('${x.offer_code}')">🗑</button></div></div>`).join("");
     document.getElementById("list").innerHTML = formHTML + (listHTML||"No offers.");
   } else if(curTab==="broadcast"){
     document.getElementById("list").innerHTML = `<div class="form-box"><h3>Broadcast Message</h3>
       <p style="font-size:12px; color:var(--muted)">Use HTML tags: &lt;b&gt;<b>Bold</b>&lt;/b&gt;, &lt;i&gt;<i>Italic</i>&lt;/i&gt;</p>
       <textarea id="bc_msg" rows="5" placeholder="Type your message here..."></textarea>
+      <p style="font-size:12px; color:var(--muted); margin-top:10px;">Buttons (Optional) - Format: <b>Name - Link</b> (One per line)</p>
+      <textarea id="bc_btns" rows="3" placeholder="My Youtube - https://youtube.com\nChat with me - https://t.me/yourid"></textarea>
       <button onclick="sendBc()">🚀 Send to All Users</button></div>`;
   } else if(curTab==="logs"){
     r=await fetch("/dashboard/api/channel-logs"); let o=await r.json();
@@ -1187,10 +1207,20 @@ async function createOffer(){
 }
 async function sendBc(){
   let msg = document.getElementById('bc_msg').value;
+  let btnRaw = document.getElementById('bc_btns').value;
   if(!msg) return alert("Message is empty!");
+  let btns = [];
+  if(btnRaw){
+     for(let l of btnRaw.split("\\n")){
+        if(l.includes("-")){
+           let pts = l.split("-");
+           btns.push({text: pts[0].trim(), url: pts.slice(1).join("-").trim()});
+        }
+     }
+  }
   if(confirm("Send this broadcast to ALL users?")){
-    await fetch("/dashboard/api/broadcast", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({message: msg})});
-    alert("Broadcast started in background!"); document.getElementById('bc_msg').value="";
+    await fetch("/dashboard/api/broadcast", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({message: msg, buttons: btns})});
+    alert("Broadcast started in background!"); document.getElementById('bc_msg').value=""; document.getElementById('bc_btns').value="";
   }
 }
 
@@ -1216,6 +1246,8 @@ def restore_pending_orders():
             threading.Thread(target=expire_qr, args=(chat_id, order.get("qr_msg_id"), order["course_id"], amt_key, order_id), daemon=True).start()
 
 if __name__ == "__main__":
+    try: BOT_USERNAME = bot.get_me().username
+    except Exception: pass
     restore_pending_orders()
     threading.Thread(target=lambda: bot.infinity_polling(skip_pending=True), daemon=True).start()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
