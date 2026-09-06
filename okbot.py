@@ -9,7 +9,8 @@ import time
 import uuid
 from datetime import datetime, timezone, timedelta
 
-from flask import Flask, request
+from flask import Flask, request, jsonify, Response
+from functools import wraps
 from PIL import Image, ImageDraw
 import pymongo
 import qrcode
@@ -51,6 +52,10 @@ SMS_POOL_TTL_HOURS = int(os.environ.get("SMS_POOL_TTL_HOURS", "5"))
 
 # 🗑️ Order records (completed/expired सब) कितनी देर DB में रहें, फिर अपने-आप delete (Render env "ORDER_TTL_HOURS", default 48h)
 ORDER_TTL_HOURS = int(os.environ.get("ORDER_TTL_HOURS", "48"))
+
+# 📊 Dashboard login — Render पर "DASHBOARD_USERNAME" और "DASHBOARD_PASSWORD" env variables ज़रूर सेट करें
+DASHBOARD_USERNAME = os.environ.get("DASHBOARD_USERNAME", "admin")
+DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "changeme123")
 
 # ज़रूरी वेरिएबल्स चेक करें
 try:
@@ -269,7 +274,7 @@ def deliver_course_to_buyer(order, sms_text=None, is_manual=False):
     course = courses_col.find_one({"course_id": course_id})
     new_status = "COMPLETED_MANUAL" if is_manual else "COMPLETED_AUTO"
     order["status"] = new_status
-    orders_col.update_one({"order_id": order_id}, {"$set": {"status": new_status, "delivered_at": get_ist_time()}})
+    orders_col.update_one({"order_id": order_id}, {"$set": {"status": new_status, "delivered_at": get_ist_time(), "delivered_at_ts": time.time()}})
 
     with pending_lock: pending_orders.pop(order.get("amount"), None)
     if user_id in user_states and user_states[user_id].get("order_id") == order_id: del user_states[user_id]
@@ -1017,6 +1022,309 @@ def sms_webhook(secret):
         except Exception: pass
         return "ambiguous", 200
     return "saved_to_pool", 200
+
+# ==========================================
+# 📊 PAYMENT DASHBOARD
+# ==========================================
+def require_auth(f):
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        auth = request.authorization
+        if not auth or auth.username != DASHBOARD_USERNAME or auth.password != DASHBOARD_PASSWORD:
+            return Response("Login required", 401, {"WWW-Authenticate": 'Basic realm="Dashboard"'})
+        return f(*args, **kwargs)
+    return wrapper
+
+def _strip_html(s):
+    return re.sub(r"<[^>]*>", "", s or "").strip()
+
+def _order_ts(o):
+    if o.get("delivered_at_ts"): return o["delivered_at_ts"]
+    ds = o.get("delivered_at")
+    if ds:
+        try: return datetime.strptime(ds, "%d-%m-%Y %I:%M:%S %p").replace(tzinfo=IST).timestamp()
+        except Exception: pass
+    return o.get("created_at", 0)
+
+def _ist_day_start(days_back=0):
+    now_ist = datetime.now(IST)
+    start = now_ist.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days_back)
+    return start.timestamp()
+
+@app.route("/dashboard/api/overview")
+@require_auth
+def api_overview():
+    now = time.time()
+    completed_q = {"status": {"$in": ["COMPLETED_AUTO", "COMPLETED_MANUAL"]}}
+    today_start, week_start = _ist_day_start(0), _ist_day_start(6)
+    today_amt = week_amt = 0.0
+    for o in orders_col.find(completed_q, {"amount": 1, "delivered_at": 1, "delivered_at_ts": 1, "created_at": 1}):
+        ts = _order_ts(o)
+        amt = float(o.get("amount", 0) or 0)
+        if ts >= week_start: week_amt += amt
+        if ts >= today_start: today_amt += amt
+
+    return jsonify({
+        "total_users": users_col.count_documents({}),
+        "total_qr_generated": orders_col.count_documents({}),
+        "active_pending": orders_col.count_documents({"status": "PENDING"}),
+        "completed_total": orders_col.count_documents(completed_q),
+        "expired_total": orders_col.count_documents({"status": "EXPIRED"}),
+        "pending_sms": sms_pool_col.count_documents({"status": "UNUSED"}),
+        "today_amount": round(today_amt, 2),
+        "week_amount": round(week_amt, 2),
+        "qr_expiry_minutes": QR_EXPIRY_SECONDS // 60,
+        "sms_pool_ttl_hours": SMS_POOL_TTL_HOURS,
+        "order_ttl_hours": ORDER_TTL_HOURS,
+        "stale_order_hours": STALE_ORDER_SECONDS // 3600,
+    })
+
+@app.route("/dashboard/api/orders")
+@require_auth
+def api_orders():
+    status_filter = request.args.get("status", "all")
+    q = {}
+    if status_filter == "pending": q = {"status": "PENDING"}
+    elif status_filter == "completed": q = {"status": {"$in": ["COMPLETED_AUTO", "COMPLETED_MANUAL"]}}
+    elif status_filter == "expired": q = {"status": "EXPIRED"}
+
+    now = time.time()
+    out = []
+    for o in orders_col.find(q).sort("created_at", -1).limit(300):
+        remaining = None
+        if o.get("status") == "PENDING":
+            remaining = max(0, int(QR_EXPIRY_SECONDS - (now - o.get("created_at", now))))
+        method = {"COMPLETED_AUTO": "Auto (SMS matched)", "COMPLETED_MANUAL": "Manual (screenshot approved)"}.get(o.get("status"))
+        out.append({
+            "order_id": o.get("order_id"), "user": _strip_html(o.get("user_mention", "")),
+            "user_id": o.get("user_id"), "course_id": o.get("course_id"), "amount": o.get("amount"),
+            "status": o.get("status"), "created_at": o.get("created_at_str"),
+            "delivered_at": o.get("delivered_at"), "remaining_seconds": remaining, "method": method,
+        })
+    return jsonify(out)
+
+@app.route("/dashboard/api/sms-pool")
+@require_auth
+def api_sms_pool():
+    now_dt = datetime.now(timezone.utc)
+    out = []
+    for s in sms_pool_col.find({"status": "UNUSED"}).sort("created_at_dt", -1).limit(300):
+        created = s.get("created_at_dt")
+        elapsed = (now_dt - created).total_seconds() if created else 0
+        remaining = max(0, int(SMS_POOL_TTL_HOURS * 3600 - elapsed))
+        out.append({
+            "amount": s.get("amount"), "created_at": s.get("created_at_str"),
+            "remaining_seconds": remaining, "preview": (s.get("raw_text") or "")[:140],
+        })
+    return jsonify(out)
+
+@app.route("/dashboard/api/users")
+@require_auth
+def api_users():
+    out = []
+    for u in users_col.find().sort("updated_at", -1).limit(500):
+        off = u.get("active_offer") or {}
+        out.append({"user_id": u.get("user_id"), "updated_at": u.get("updated_at"), "active_offer": off.get("offer_code")})
+    return jsonify(out)
+
+DASHBOARD_HTML = """<!DOCTYPE html>
+<html lang="hi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Payments Ledger</title>
+<style>
+  :root{
+    --bg:#0F1512; --surface:#141C18; --row-hover:#1B2621; --line:#26332C;
+    --text:#EDF2EF; --muted:#8FA398;
+    --ok:#3ED9A0; --pending:#E8A94A; --danger:#E8695F;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0; background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; font-size:15px;}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}
+  header{padding:22px 20px 14px; display:flex; justify-content:space-between; align-items:baseline; border-bottom:1px solid var(--line);}
+  header h1{font-size:19px; font-weight:600; margin:0;}
+  header .clock{color:var(--muted); font-size:13px;}
+  .ledger{margin:16px 20px; border:1px solid var(--line); border-radius:6px; overflow:hidden;}
+  .ledger .row{display:flex; justify-content:space-between; align-items:center; padding:13px 16px; border-bottom:1px solid var(--line);}
+  .ledger .row:last-child{border-bottom:none;}
+  .ledger .label{color:var(--muted); font-size:13.5px;}
+  .ledger .value{font-size:17px; font-weight:600;}
+  .ledger-grid{display:grid; grid-template-columns:repeat(2,1fr);}
+  .ledger-grid .row{border-right:1px solid var(--line); flex-direction:column; align-items:flex-start; gap:4px;}
+  .ledger-grid .row:nth-child(2n){border-right:none;}
+  .tabs{display:flex; gap:22px; margin:22px 20px 0; border-bottom:1px solid var(--line);}
+  .tab{color:var(--muted); padding:8px 0; cursor:pointer; font-size:14px; border-bottom:2px solid transparent;}
+  .tab.active{color:var(--text); border-bottom-color:var(--ok);}
+  .subtabs{display:flex; gap:14px; margin:14px 20px 0; overflow-x:auto;}
+  .subtab{color:var(--muted); font-size:13px; padding:5px 12px; border:1px solid var(--line); border-radius:20px; white-space:nowrap; cursor:pointer;}
+  .subtab.active{color:var(--bg); background:var(--ok); border-color:var(--ok);}
+  .list{margin:14px 20px 40px;}
+  .item{display:flex; gap:12px; align-items:center; padding:12px 14px; border-left:3px solid var(--line); background:var(--surface); border-radius:4px; margin-bottom:8px;}
+  .item.ok{border-left-color:var(--ok);}
+  .item.pending{border-left-color:var(--pending);}
+  .item.expired{border-left-color:var(--danger);}
+  .item .main{flex:1; min-width:0;}
+  .item .name{font-weight:600; font-size:14px;}
+  .item .sub{color:var(--muted); font-size:12.5px; margin-top:2px; word-break:break-all;}
+  .item .amt{font-size:15px; font-weight:600; white-space:nowrap;}
+  .item .timer{font-size:12.5px; color:var(--pending); white-space:nowrap;}
+  .empty{color:var(--muted); text-align:center; padding:40px 0; font-size:13.5px;}
+  @media (max-width:640px){
+    .ledger-grid{grid-template-columns:1fr;}
+    .ledger-grid .row{border-right:none;}
+    .item{flex-wrap:wrap;}
+    .item .amt{margin-left:auto;}
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Payments Ledger</h1>
+  <div class="clock mono" id="clock">--:--:--</div>
+</header>
+
+<div class="ledger ledger-grid" id="overview"></div>
+
+<div class="tabs">
+  <div class="tab active" data-tab="orders">Orders</div>
+  <div class="tab" data-tab="sms">SMS Pool</div>
+  <div class="tab" data-tab="users">Users</div>
+</div>
+<div class="subtabs" id="subtabs">
+  <div class="subtab active" data-status="all">All</div>
+  <div class="subtab" data-status="pending">Pending</div>
+  <div class="subtab" data-status="completed">Completed</div>
+  <div class="subtab" data-status="expired">Expired</div>
+</div>
+<div class="list" id="list"><div class="empty">Loading…</div></div>
+
+<script>
+let currentTab = "orders", currentStatus = "all";
+let liveData = [];
+
+function fmtSecs(s){
+  if(s == null) return "";
+  if(s <= 0) return "0s";
+  const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), sec = Math.floor(s%60);
+  if(h > 0) return h+"h "+m+"m";
+  if(m > 0) return m+"m "+sec+"s";
+  return sec+"s";
+}
+
+async function loadOverview(){
+  const r = await fetch("/dashboard/api/overview");
+  const d = await r.json();
+  document.getElementById("overview").innerHTML = `
+    <div class="row"><span class="label">Aaj ka collection</span><span class="value mono">₹${d.today_amount}</span></div>
+    <div class="row"><span class="label">Is hafte ka collection</span><span class="value mono">₹${d.week_amount}</span></div>
+    <div class="row"><span class="label">Active QR (abhi generate hue)</span><span class="value mono">${d.active_pending}</span></div>
+    <div class="row"><span class="label">Total completed orders</span><span class="value mono">${d.completed_total}</span></div>
+    <div class="row"><span class="label">Total expired orders</span><span class="value mono">${d.expired_total}</span></div>
+    <div class="row"><span class="label">Pending SMS (buffer me)</span><span class="value mono">${d.pending_sms}</span></div>
+    <div class="row"><span class="label">Total QR generate hue (all-time)</span><span class="value mono">${d.total_qr_generated}</span></div>
+    <div class="row"><span class="label">Total users (bot start kiya)</span><span class="value mono">${d.total_users}</span></div>
+  `;
+}
+
+function renderOrders(data){
+  if(!data.length){ document.getElementById("list").innerHTML = '<div class="empty">Koi order nahi mila.</div>'; return; }
+  document.getElementById("list").innerHTML = data.map(o => {
+    const cls = o.status === "PENDING" ? "pending" : (o.status === "EXPIRED" ? "expired" : "ok");
+    const right = o.status === "PENDING"
+      ? `<div class="timer mono" data-remaining="${o.remaining_seconds}">${fmtSecs(o.remaining_seconds)} bacha</div>`
+      : `<div class="sub">${o.method || o.status}</div>`;
+    return `<div class="item ${cls}">
+      <div class="main">
+        <div class="name">${o.user || "User "+o.user_id} · <span class="mono">${o.course_id}</span></div>
+        <div class="sub">Order <span class="mono">${o.order_id}</span> · ${o.created_at}</div>
+      </div>
+      <div style="text-align:right">
+        <div class="amt mono">₹${o.amount}</div>
+        ${right}
+      </div>
+    </div>`;
+  }).join("");
+}
+
+function renderSms(data){
+  if(!data.length){ document.getElementById("list").innerHTML = '<div class="empty">SMS pool khaali hai.</div>'; return; }
+  document.getElementById("list").innerHTML = data.map(s => `
+    <div class="item pending">
+      <div class="main">
+        <div class="name">₹<span class="mono">${s.amount}</span></div>
+        <div class="sub mono">${s.preview}</div>
+      </div>
+      <div style="text-align:right">
+        <div class="sub">${s.created_at}</div>
+        <div class="timer mono" data-remaining="${s.remaining_seconds}">${fmtSecs(s.remaining_seconds)} me delete</div>
+      </div>
+    </div>`).join("");
+}
+
+function renderUsers(data){
+  if(!data.length){ document.getElementById("list").innerHTML = '<div class="empty">Koi user nahi mila.</div>'; return; }
+  document.getElementById("list").innerHTML = data.map(u => `
+    <div class="item ok">
+      <div class="main">
+        <div class="name">User ID: <span class="mono">${u.user_id}</span></div>
+        <div class="sub">Last active: ${u.updated_at || "—"}${u.active_offer ? " · Offer: "+u.active_offer : ""}</div>
+      </div>
+    </div>`).join("");
+}
+
+async function loadList(){
+  if(currentTab === "orders"){
+    const r = await fetch("/dashboard/api/orders?status="+currentStatus);
+    liveData = await r.json();
+    renderOrders(liveData);
+  } else if(currentTab === "sms"){
+    const r = await fetch("/dashboard/api/sms-pool");
+    liveData = await r.json();
+    renderSms(liveData);
+  } else {
+    const r = await fetch("/dashboard/api/users");
+    liveData = await r.json();
+    renderUsers(liveData);
+  }
+}
+
+document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () => {
+  document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
+  t.classList.add("active");
+  currentTab = t.dataset.tab;
+  document.getElementById("subtabs").style.display = currentTab === "orders" ? "flex" : "none";
+  loadList();
+}));
+document.querySelectorAll(".subtab").forEach(t => t.addEventListener("click", () => {
+  document.querySelectorAll(".subtab").forEach(x => x.classList.remove("active"));
+  t.classList.add("active");
+  currentStatus = t.dataset.status;
+  loadList();
+}));
+
+function tickTimers(){
+  document.querySelectorAll("[data-remaining]").forEach(el => {
+    let s = parseInt(el.dataset.remaining) - 1;
+    if(s < 0) s = 0;
+    el.dataset.remaining = s;
+    el.textContent = (el.textContent.includes("delete") ? fmtSecs(s)+" me delete" : fmtSecs(s)+" bacha");
+  });
+  document.getElementById("clock").textContent = new Date().toLocaleTimeString("en-IN", {hour12:true});
+}
+
+loadOverview(); loadList();
+setInterval(loadOverview, 15000);
+setInterval(loadList, 15000);
+setInterval(tickTimers, 1000);
+</script>
+</body>
+</html>"""
+
+@app.route("/dashboard")
+@require_auth
+def dashboard_page():
+    return DASHBOARD_HTML
 
 # ==========================================
 # 🔁 RESTART RECOVERY — server restart/sleep के बाद pending orders वापस लोड करें
