@@ -43,6 +43,15 @@ PROTECT_CONTENT = os.environ.get("PROTECT_CONTENT", "False").strip().lower() == 
 QR_EXPIRY_SECONDS = int(os.environ.get("QR_EXPIRY_MINUTES", "10")) * 60
 INACTIVITY_CLEANUP_SECONDS = 86400   # 24 घंटे
 
+# 🗑️ पुराने EXPIRED orders कब तक SMS से match हो सकते हैं (default 24 घंटे) — Render env "STALE_ORDER_HOURS"
+STALE_ORDER_SECONDS = int(os.environ.get("STALE_ORDER_HOURS", "24")) * 3600
+
+# 🗑️ Unmatched SMS pool records कितनी देर DB में रहें, फिर अपने-आप delete (Render env "SMS_POOL_TTL_HOURS", default 5h)
+SMS_POOL_TTL_HOURS = int(os.environ.get("SMS_POOL_TTL_HOURS", "5"))
+
+# 🗑️ Order records (completed/expired सब) कितनी देर DB में रहें, फिर अपने-आप delete (Render env "ORDER_TTL_HOURS", default 48h)
+ORDER_TTL_HOURS = int(os.environ.get("ORDER_TTL_HOURS", "48"))
+
 # ज़रूरी वेरिएबल्स चेक करें
 try:
     ADMIN_ID = int(os.environ.get("ADMIN_ID"))
@@ -80,10 +89,12 @@ try:
     sms_pool_col = db["sms_pool"]      # SMS बफर पूल
     offers_col = db["offers"]          # डिस्काउंट ऑफर्स
 
-    # ऑटो-डिलीट (TTL): SMS 5 घंटे में और ऑर्डर्स 48 घंटे में डिलीट होंगे
+    # ऑटो-डिलीट (TTL): SMS pool "SMS_POOL_TTL_HOURS" में और orders "ORDER_TTL_HOURS" में डिलीट होंगे
     try:
-        sms_pool_col.create_index("created_at_dt", expireAfterSeconds=18000)
-        orders_col.create_index("created_at_dt", expireAfterSeconds=172800)
+        sms_pool_col.create_index("created_at_dt", expireAfterSeconds=SMS_POOL_TTL_HOURS * 3600)
+        # ⚠️ पहले यहाँ "created_at_dt" field इस्तेमाल हो रहा था जो orders में कभी set ही नहीं होता था
+        # (order में सिर्फ "created_at" epoch-float होता है) -> इसलिए ये TTL कभी काम ही नहीं कर रहा था, orders हमेशा DB में पड़े रहते थे।
+        orders_col.create_index("created_at_dt", expireAfterSeconds=ORDER_TTL_HOURS * 3600)
     except Exception:
         pass
     print(f"✅ MongoDB Connected! (Database: {MONGO_DB_NAME})")
@@ -247,11 +258,10 @@ def expire_qr(chat_id, message_id, course_id, amount_key, order_id):
     try: bot.delete_message(chat_id, message_id)
     except Exception: pass
 
-    # 📸 सीधा screenshot माँगें, कोई button नहीं — user जो भी अगली photo/document भेजेगा
-    # वो अपने-आप admin को manual approval के लिए चला जाएगा
-    user_states[chat_id] = {"step": "WAITING_PAYMENT_SS", "order_id": order_id}
+    # 📸 Match नहीं मिला -> "Verify Payment" button दें (मौजूदा paydone_ handler ही आगे संभालेगा)
+    markup = InlineKeyboardMarkup().row(InlineKeyboardButton("✅ Verify Payment", callback_data=f"paydone_{order_id}"))
     try:
-        bot.send_message(chat_id, "⏳ <b>Time's up!</b>\n\n📸 Apna <b>payment screenshot</b> neeche bhej dijiye.", parse_mode="HTML")
+        bot.send_message(chat_id, "⏳ <b>Time's up!</b>\n\nAgar aapne payment kar diya hai, to neeche <b>'✅ Verify Payment'</b> dabayein.", reply_markup=markup, parse_mode="HTML")
     except Exception: pass
 
 def deliver_course_to_buyer(order, sms_text=None, is_manual=False):
@@ -837,7 +847,7 @@ def handle_buttons(call):
                 "order_id": order_id, "course_id": course_id, "user_id": call.from_user.id, "chat_id": chat_id,
                 "user_mention": u_men, "amount": amt_key, "original_amount": str(base_price), "discount_percent": disc_pct,
                 "offer_id": off_code, "status": "PENDING", "created_at_dt": datetime.now(timezone.utc),
-                "created_at_str": get_ist_time(), "created_at": time.time(), "channel_msg_id": None
+                "created_at_str": get_ist_time(), "created_at": time.time(), "created_at_dt": datetime.now(timezone.utc), "channel_msg_id": None
             }
 
             d_log = f"\n🎟 <b>Offer Applied:</b> {disc_pct}% OFF (Original: ₹{base_price})" if disc_pct else ""
@@ -993,7 +1003,9 @@ def sms_webhook(secret):
         if len(cands) == 1: order = pending_orders.pop(cands[0])
         else: amb = len(cands) > 1
 
-    if not order: order = orders_col.find_one({"amount": f_round, "status": {"$in": ["PENDING", "EXPIRED"]}})
+    if not order:
+        stale_cutoff = time.time() - STALE_ORDER_SECONDS
+        order = orders_col.find_one({"amount": f_round, "status": {"$in": ["PENDING", "EXPIRED"]}, "created_at": {"$gte": stale_cutoff}})
     
     if order:
         sms_pool_col.update_one({"amount": f_round, "status": "UNUSED"}, {"$set": {"status": "PROCESSED"}})
