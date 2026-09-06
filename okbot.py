@@ -79,6 +79,7 @@ try:
     orders_col = db["orders"]
     sms_pool_col = db["sms_pool"]
     offers_col = db["offers"]
+    channel_logs_col = db["channel_logs"]  # NEW: For tracking Approved/Denied channel joins
 
     try:
         sms_pool_col.create_index("created_at_dt", expireAfterSeconds=SMS_POOL_TTL_HOURS * 3600)
@@ -286,15 +287,18 @@ def handle_join_request(message):
         
     course_id = course["course_id"]
     purchase = purchases_col.find_one({"user_id": user_id, "item_info": {"$regex": course_id}})
+    now_str = get_ist_time()
     
     if purchase:
         try: 
             bot.approve_chat_join_request(chat_id, user_id)
+            channel_logs_col.insert_one({"user_id": user_id, "course_id": course_id, "status": "APPROVED", "date": now_str})
             orig_send_message(user_id, f"✅ <b>Request Approved!</b>\nWelcome to the channel.", parse_mode="HTML")
         except Exception: pass
     else:
         try:
             bot.decline_chat_join_request(chat_id, user_id)
+            channel_logs_col.insert_one({"user_id": user_id, "course_id": course_id, "status": "DENIED", "date": now_str})
             orig_send_message(user_id, f"❌ <b>Access Denied!</b>\nYou haven't purchased this pack yet. Please buy it from the bot first.", parse_mode="HTML")
             orig_send_message(ADMIN_ID, f"⚠️ <b>Unauthorized Access Blocked</b>\nUser: <a href='tg://user?id={user_id}'>{user_id}</a> tried to join without payment.\nChannel: <code>{chat_id}</code>", parse_mode="HTML")
         except Exception: pass
@@ -1023,6 +1027,54 @@ def api_delete_course(course_id):
     settings_col.update_one({"_id": "store_plans"}, {"$pull": {"course_ids": course_id}})
     return jsonify({"status": "success"})
 
+@app.route("/dashboard/api/offers", methods=["GET", "POST"])
+@require_auth
+def api_offers():
+    if request.method == "POST":
+        d = request.json
+        off_code = "off_" + str(uuid.uuid4())[:6]
+        now_ts = time.time()
+        hrs = float(d.get("hours", 24))
+        doc = {
+            "offer_code": off_code, "discount_percent": int(d.get("discount", 10)),
+            "target_type": d.get("target_type", "all"), "target_course_id": d.get("course_id", ""),
+            "max_users": int(d.get("max_users", -1)), "used_count": 0,
+            "created_at_ts": now_ts, "expires_at_ts": now_ts + (hrs * 3600),
+            "expires_str": (datetime.now(IST) + timedelta(hours=hrs)).strftime("%d-%m-%Y %I:%M %p")
+        }
+        offers_col.insert_one(doc)
+        return jsonify({"status": "success"})
+    
+    out = []
+    now = time.time()
+    for o in offers_col.find().sort("created_at_ts", -1):
+        status = "Active" if o["expires_at_ts"] > now and (o["max_users"] == -1 or o["used_count"] < o["max_users"]) else "Expired"
+        out.append({"offer_code": o["offer_code"], "discount": o["discount_percent"], "target": o["target_type"], "course": o["target_course_id"], "used": o["used_count"], "max": o["max_users"], "expires": o["expires_str"], "status": status})
+    return jsonify(out)
+
+@app.route("/dashboard/api/offers/<offer_code>", methods=["DELETE"])
+@require_auth
+def api_delete_offer(offer_code):
+    offers_col.delete_one({"offer_code": offer_code})
+    return jsonify({"status": "success"})
+
+@app.route("/dashboard/api/broadcast", methods=["POST"])
+@require_auth
+def api_broadcast():
+    msg = request.json.get("message")
+    if not msg: return jsonify({"error": "Empty message"}), 400
+    def run_bc():
+        for u in users_col.find():
+            try: bot.send_message(u["user_id"], msg, parse_mode="HTML")
+            except Exception: pass
+    threading.Thread(target=run_bc).start()
+    return jsonify({"status": "success"})
+
+@app.route("/dashboard/api/channel-logs")
+@require_auth
+def api_channel_logs():
+    return jsonify([{"user_id": l["user_id"], "course": l["course_id"], "status": l["status"], "date": l["date"]} for l in channel_logs_col.find().sort("_id", -1).limit(100)])
+
 @app.route("/dashboard/api/sms-pool")
 @require_auth
 def api_sms_pool():
@@ -1044,7 +1096,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .ledger{display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:10px; padding:15px;}
   .ledger .row{background:var(--surface); padding:15px; border-radius:6px; border:1px solid var(--line);}
   .tabs{display:flex; gap:15px; padding:10px 15px; border-bottom:1px solid var(--line); overflow-x:auto;}
-  .tab{color:var(--muted); cursor:pointer; padding-bottom:5px; border-bottom:2px solid transparent;}
+  .tab{color:var(--muted); cursor:pointer; padding-bottom:5px; border-bottom:2px solid transparent; white-space:nowrap;}
   .tab.active{color:var(--text); border-bottom-color:var(--ok);}
   .subtabs{display:flex; gap:10px; padding:10px 15px;}
   .subtab{color:var(--muted); padding:4px 10px; border:1px solid var(--line); border-radius:15px; cursor:pointer;}
@@ -1053,14 +1105,21 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .item{display:flex; justify-content:space-between; align-items:center; background:var(--surface); padding:10px; margin-bottom:8px; border-left:3px solid var(--line); border-radius:4px;}
   .item.ok{border-color:var(--ok);} .item.pending{border-color:var(--pending);} .item.expired{border-color:var(--danger);}
   .item .main{flex:1;} .item .name{font-weight:bold;} .item .sub{color:var(--muted); font-size:12px; margin-top:3px;}
-  .item .amt{font-size:15px; font-weight:bold;} .action-btn{background:var(--surface); color:var(--text); border:1px solid var(--line); padding:6px 10px; border-radius:4px; cursor:pointer; font-size:12px; margin-top:6px; display:inline-block;}
+  .item .amt{font-size:15px; font-weight:bold;} 
+  .action-btn{background:var(--surface); color:var(--text); border:1px solid var(--line); padding:6px 10px; border-radius:4px; cursor:pointer; font-size:12px; margin-top:6px; display:inline-block;}
   .ok-btn{border-color:var(--ok); color:var(--ok);} .danger-btn{border-color:var(--danger); color:var(--danger);}
+  .form-box{background:var(--surface); padding:15px; border-radius:6px; border:1px solid var(--line); margin-bottom:15px;}
+  .form-box input, .form-box select, .form-box textarea{width:100%; padding:8px; margin:5px 0 10px; background:var(--bg); border:1px solid var(--line); color:var(--text); border-radius:4px;}
+  .form-box button{background:var(--ok); color:var(--bg); border:none; padding:10px 15px; border-radius:4px; font-weight:bold; cursor:pointer;}
 </style></head><body>
 <header><h2>Store Dashboard</h2><div id="clock" class="mono"></div></header>
 <div class="ledger" id="overview"></div>
 <div class="tabs">
   <div class="tab active" data-tab="orders">Orders</div>
   <div class="tab" data-tab="courses">Courses</div>
+  <div class="tab" data-tab="offers">Offers</div>
+  <div class="tab" data-tab="logs">Channel Logs</div>
+  <div class="tab" data-tab="broadcast">Broadcast</div>
   <div class="tab" data-tab="sms">SMS Pool</div>
   <div class="tab" data-tab="users">Users</div>
 </div>
@@ -1086,12 +1145,31 @@ async function load(){
     document.getElementById("list").innerHTML = o.map(x=>{
       let c=x.status==="PENDING"?"pending":x.status==="EXPIRED"?"expired":"ok";
       let rgt = x.status==="PENDING"?`<div class="timer mono" data-remain="${x.remaining_seconds}">${fmtSecs(x.remaining_seconds)} bacha</div>`:`<div class="sub">${x.method||x.status}</div>`;
-      if((x.status==="PENDING"||x.status==="EXPIRED") && x.has_screenshot) rgt+=`<button class="action-btn ok-btn" onclick="appr('${x.order_id}')">📸 Approve (SS)</button>`;
+      if((x.status==="PENDING"||x.status==="EXPIRED") && x.has_screenshot) rgt+=`<br><button class="action-btn ok-btn" onclick="appr('${x.order_id}')">📸 Approve (SS)</button>`;
       return `<div class="item ${c}"><div class="main"><div class="name">${x.user} · <span class="mono">${x.course_id}</span></div><div class="sub">${x.order_id} · ${x.created_at}</div></div><div style="text-align:right"><div class="amt mono">₹${x.amount}</div>${rgt}</div></div>`;
     }).join("")||"No orders.";
   } else if(curTab==="courses"){
     r=await fetch("/dashboard/api/courses"); let o=await r.json();
     document.getElementById("list").innerHTML = o.map(x=>`<div class="item ok"><div class="main"><div class="name"><span class="mono">${x.course_id}</span> ${x.is_channel?'📢 Channel':'📝 Text'}</div><div class="sub">₹${x.amount} · ${x.caption}</div></div><div><button class="action-btn danger-btn" onclick="delC('${x.course_id}')">🗑 Delete</button></div></div>`).join("")||"No courses.";
+  } else if(curTab==="offers"){
+    r=await fetch("/dashboard/api/offers"); let o=await r.json();
+    let formHTML = `<div class="form-box"><h3>Create New Offer</h3>
+      <label>Discount %:</label><input type="number" id="off_disc" value="50">
+      <label>Target:</label><select id="off_tgt" onchange="document.getElementById('off_cid').style.display=this.value=='single'?'block':'none'"><option value="all">All Courses</option><option value="single">Single Course</option></select>
+      <input type="text" id="off_cid" placeholder="Course ID (e.g. c_12345)" style="display:none">
+      <label>Max Users (0 for unlimited):</label><input type="number" id="off_max" value="0">
+      <label>Active Hours:</label><input type="number" id="off_hrs" value="24">
+      <button onclick="createOffer()">Create Offer</button></div>`;
+    let listHTML = o.map(x=>`<div class="item ${x.status==='Active'?'ok':'expired'}"><div class="main"><div class="name">${x.discount}% OFF - <span class="mono">${x.offer_code}</span></div><div class="sub">Target: ${x.target} ${x.course?'('+x.course+')':''} | Used: ${x.used}/${x.max==-1?'∞':x.max} | Exp: ${x.expires}</div></div><div><button class="action-btn danger-btn" onclick="delOffer('${x.offer_code}')">🗑</button></div></div>`).join("");
+    document.getElementById("list").innerHTML = formHTML + (listHTML||"No offers.");
+  } else if(curTab==="broadcast"){
+    document.getElementById("list").innerHTML = `<div class="form-box"><h3>Broadcast Message</h3>
+      <p style="font-size:12px; color:var(--muted)">Use HTML tags: &lt;b&gt;<b>Bold</b>&lt;/b&gt;, &lt;i&gt;<i>Italic</i>&lt;/i&gt;</p>
+      <textarea id="bc_msg" rows="5" placeholder="Type your message here..."></textarea>
+      <button onclick="sendBc()">🚀 Send to All Users</button></div>`;
+  } else if(curTab==="logs"){
+    r=await fetch("/dashboard/api/channel-logs"); let o=await r.json();
+    document.getElementById("list").innerHTML = o.map(x=>`<div class="item ${x.status==='APPROVED'?'ok':'expired'}"><div class="main"><div class="name">User: <span class="mono">${x.user_id}</span></div><div class="sub">Pack: ${x.course} · ${x.date}</div></div><div style="font-weight:bold; color:var(--${x.status==='APPROVED'?'ok':'danger'})">${x.status}</div></div>`).join("")||"No logs yet.";
   } else if(curTab==="sms"){
     r=await fetch("/dashboard/api/sms-pool"); let o=await r.json();
     document.getElementById("list").innerHTML = o.map(x=>`<div class="item pending"><div class="main"><div class="name">₹${x.amount}</div><div class="sub mono">${x.preview}</div></div><div><div class="sub">${x.created_at}</div></div></div>`).join("")||"No SMS.";
@@ -1102,6 +1180,20 @@ async function load(){
 }
 async function appr(id){ if(confirm("Approve order manually?")){ await fetch("/dashboard/api/orders/"+id+"/approve",{method:"POST"}); load(); } }
 async function delC(id){ if(confirm("Delete course?")){ await fetch("/dashboard/api/courses/"+id,{method:"DELETE"}); load(); } }
+async function delOffer(id){ if(confirm("Delete this offer?")){ await fetch("/dashboard/api/offers/"+id,{method:"DELETE"}); load(); } }
+async function createOffer(){
+  let d = { discount: document.getElementById('off_disc').value, target_type: document.getElementById('off_tgt').value, course_id: document.getElementById('off_cid').value, max_users: document.getElementById('off_max').value==-1?-1:(document.getElementById('off_max').value==0?-1:document.getElementById('off_max').value), hours: document.getElementById('off_hrs').value };
+  await fetch("/dashboard/api/offers", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(d)}); load();
+}
+async function sendBc(){
+  let msg = document.getElementById('bc_msg').value;
+  if(!msg) return alert("Message is empty!");
+  if(confirm("Send this broadcast to ALL users?")){
+    await fetch("/dashboard/api/broadcast", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({message: msg})});
+    alert("Broadcast started in background!"); document.getElementById('bc_msg').value="";
+  }
+}
+
 document.querySelectorAll(".tab").forEach(t=>t.addEventListener("click",()=>{ document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active")); t.classList.add("active"); curTab=t.dataset.tab; document.getElementById("subtabs").style.display=curTab==="orders"?"flex":"none"; load(); }));
 document.querySelectorAll(".subtab").forEach(t=>t.addEventListener("click",()=>{ document.querySelectorAll(".subtab").forEach(x=>x.classList.remove("active")); t.classList.add("active"); curSt=t.dataset.status; load(); }));
 setInterval(()=>{ document.querySelectorAll("[data-remain]").forEach(el=>{ let s=Math.max(0,el.dataset.remain-1); el.dataset.remain=s; el.textContent=fmtSecs(s)+" bacha"; }); document.getElementById("clock").textContent=new Date().toLocaleTimeString("en-IN"); }, 1000);
