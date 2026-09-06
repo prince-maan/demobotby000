@@ -186,12 +186,15 @@ def update_channel_order_status(order, status_type, extra_text=""):
     user_mention = order.get("user_mention", f"User ({order['user_id']})")
     discount_info = f"\n🎟 <b>Offer Applied:</b> {order.get('discount_percent')}% OFF (Original: ₹{order.get('original_amount')})" if order.get("discount_percent") else ""
 
+    course = courses_col.find_one({"course_id": order.get("course_id")})
+    ch_name = f"\n📺 <b>Channel:</b> {course.get('channel_name')}" if course and course.get("channel_name") else ""
+
     if status_type == "EXPIRED":
-        new_text = f"🔴 <b>[UNPAID / QR EXPIRED]</b>\n\n👤 <b>User:</b> {user_mention}\n🔖 <b>Order ID:</b> <code>{order['order_id']}</code>\n📚 <b>Pack:</b> <code>{order['course_id']}</code>\n💰 <b>Amount:</b> ₹{order['amount']}{discount_info}\n⏰ <b>Initiated at:</b> {order.get('created_at_str', '')}\n⏳ <b>Status:</b> ⚠️ 10 मिनट में पेमेंट नहीं आई (स्क्रीनशॉट पेंडिंग)"
+        new_text = f"🔴 <b>[UNPAID / QR EXPIRED]</b>\n\n👤 <b>User:</b> {user_mention}\n🔖 <b>Order ID:</b> <code>{order['order_id']}</code>\n📚 <b>Pack:</b> <code>{order['course_id']}</code>{ch_name}\n💰 <b>Amount:</b> ₹{order['amount']}{discount_info}\n⏰ <b>Initiated at:</b> {order.get('created_at_str', '')}\n⏳ <b>Status:</b> ⚠️ 10 मिनट में पेमेंट नहीं आई (स्क्रीनशॉट पेंडिंग)"
     elif status_type == "AUTO_VERIFIED":
-        new_text = f"🟢 <b>[PAYMENT COMPLETED & AUTO-DELIVERED]</b>\n\n👤 <b>User:</b> {user_mention}\n🔖 <b>Order ID:</b> <code>{order['order_id']}</code>\n📚 <b>Pack:</b> <code>{order['course_id']}</code>\n💰 <b>Amount Paid:</b> ₹{order['amount']}{discount_info}\n⏰ <b>Delivered at:</b> {get_ist_time()}\n⚡ <b>Status:</b> ✅ ऑटो-वेरिफाइड (SMS द्वारा)\n\n📩 <code>{extra_text[:180]}</code>"
+        new_text = f"🟢 <b>[PAYMENT COMPLETED & AUTO-DELIVERED]</b>\n\n👤 <b>User:</b> {user_mention}\n🔖 <b>Order ID:</b> <code>{order['order_id']}</code>\n📚 <b>Pack:</b> <code>{order['course_id']}</code>{ch_name}\n💰 <b>Amount Paid:</b> ₹{order['amount']}{discount_info}\n⏰ <b>Delivered at:</b> {get_ist_time()}\n⚡ <b>Status:</b> ✅ ऑटो-वेरिफाइड (SMS द्वारा)\n\n📩 <code>{extra_text[:180]}</code>"
     elif status_type == "MANUAL_APPROVED":
-        new_text = f"✅ <b>[MANUAL-APPROVED & DELIVERED]</b>\n\n👤 <b>User:</b> {user_mention}\n🔖 <b>Order ID:</b> <code>{order['order_id']}</code>\n📚 <b>Pack:</b> <code>{order['course_id']}</code>\n💰 <b>Amount:</b> ₹{order['amount']}{discount_info}\n⏰ <b>Approved at:</b> {get_ist_time()}\n⚡ <b>Status:</b> ✅ एडमिन द्वारा स्क्रीनशॉट देखकर अप्रूव किया गया"
+        new_text = f"✅ <b>[MANUAL-APPROVED & DELIVERED]</b>\n\n👤 <b>User:</b> {user_mention}\n🔖 <b>Order ID:</b> <code>{order['order_id']}</code>\n📚 <b>Pack:</b> <code>{order['course_id']}</code>{ch_name}\n💰 <b>Amount:</b> ₹{order['amount']}{discount_info}\n⏰ <b>Approved at:</b> {get_ist_time()}\n⚡ <b>Status:</b> ✅ एडमिन द्वारा स्क्रीनशॉट देखकर अप्रूव किया गया"
     else: return
 
     try: bot.edit_message_text(new_text, chat_id=DB_CHANNEL_ID, message_id=channel_msg_id, parse_mode="HTML")
@@ -272,7 +275,7 @@ def background_order_checker(order_id, amount_str, max_seconds=None):
             break
 
 # ==========================================
-# 🛑 GATEKEEPER: CHANNEL JOIN REQUEST HANDLER (CROSS-OVER SAFE)
+# 🛑 GATEKEEPER: CHANNEL JOIN REQUEST HANDLER
 # ==========================================
 @bot.chat_join_request_handler()
 def handle_join_request(message):
@@ -290,21 +293,44 @@ def handle_join_request(message):
         return
         
     course_id = course["course_id"]
+    channel_name = course.get("channel_name") or message.chat.title or f"Private Channel/Group"
     purchase = purchases_col.find_one({"user_id": user_id, "item_info": {"$regex": course_id}})
     now_str = get_ist_time()
     
+    u_first_name = message.from_user.first_name
+    u_username = message.from_user.username or "None"
+    u_men = f"<a href='tg://user?id={user_id}'>{u_first_name}</a>"
+
     if purchase:
         try: 
             bot.approve_chat_join_request(chat_id, user_id)
-            channel_logs_col.insert_one({"user_id": user_id, "course_id": course_id, "status": "APPROVED", "date": now_str})
-            orig_send_message(user_id, f"✅ <b>Request Approved!</b>\nWelcome to the Private Group/Channel.", parse_mode="HTML")
+            channel_logs_col.insert_one({
+                "user_id": user_id, 
+                "first_name": u_first_name,
+                "username": u_username,
+                "course_id": course_id, 
+                "channel_name": channel_name, 
+                "status": "APPROVED", 
+                "date": now_str
+            })
+            orig_send_message(user_id, f"✅ <b>Request Approved!</b>\nWelcome to <b>{channel_name}</b>.", parse_mode="HTML")
         except Exception: pass
     else:
         try:
             bot.decline_chat_join_request(chat_id, user_id)
-            channel_logs_col.insert_one({"user_id": user_id, "course_id": course_id, "status": "DENIED", "date": now_str})
+            channel_logs_col.insert_one({
+                "user_id": user_id, 
+                "first_name": u_first_name,
+                "username": u_username,
+                "course_id": course_id, 
+                "channel_name": channel_name, 
+                "status": "DENIED", 
+                "date": now_str
+            })
             orig_send_message(user_id, f"❌ <b>Access Denied!</b>\nYou haven't purchased this pack yet. Please buy it from the bot first.", parse_mode="HTML")
-            orig_send_message(ADMIN_ID, f"⚠️ <b>Unauthorized Access Blocked</b>\nUser: <a href='tg://user?id={user_id}'>{user_id}</a> tried to join without payment.\nChannel/Group: <code>{chat_id}</code>", parse_mode="HTML")
+            
+            log_msg = f"🚫 <b>[JOIN DENIED - NO PAYMENT]</b>\n\n👤 <b>User:</b> {u_men} (<code>{user_id}</code>)\n📺 <b>Channel:</b> {channel_name}\n⏰ <b>Time:</b> {now_str}"
+            orig_send_message(DB_CHANNEL_ID, log_msg, parse_mode="HTML")
         except Exception: pass
 
 # ==========================================
@@ -471,7 +497,13 @@ def handle_all_messages(message):
         del user_states[user_id]
         u_str = f"@{message.from_user.username}" if message.from_user.username else "No Username"
         u_men = f"<a href='tg://user?id={user_id}'>{message.from_user.first_name}</a> ({u_str})"
-        cap = f"📩 <b>[MANUAL APPROVAL - PAYMENT SCREENSHOT]</b>\n\n👤 <b>User:</b> {u_men}\n🆔 <b>ID:</b> <code>{user_id}</code>\n🔖 <b>Order:</b> <code>{order_id}</code>\n📚 <b>Pack:</b> <code>{order['course_id'] if order else 'N/A'}</code>\n💰 <b>Amount:</b> ₹{order['amount'] if order else 'N/A'}\n⏰ <b>Time:</b> {get_ist_time()}"
+        
+        course_id = order['course_id'] if order else 'N/A'
+        course_obj = courses_col.find_one({"course_id": course_id}) if order else None
+        ch_name_display = f"\n📺 <b>Channel:</b> {course_obj.get('channel_name')}" if course_obj and course_obj.get("channel_name") else ""
+
+        cap = f"📩 <b>[MANUAL APPROVAL - PAYMENT SCREENSHOT]</b>\n\n👤 <b>User:</b> {u_men}\n🆔 <b>ID:</b> <code>{user_id}</code>\n🔖 <b>Order:</b> <code>{order_id}</code>\n📚 <b>Pack:</b> <code>{course_id}</code>{ch_name_display}\n💰 <b>Amount:</b> ₹{order['amount'] if order else 'N/A'}\n⏰ <b>Time:</b> {get_ist_time()}"
+        
         c_url = f"https://t.me/{message.from_user.username}" if message.from_user.username else f"tg://user?id={user_id}"
         m_admin = InlineKeyboardMarkup().row(InlineKeyboardButton("✅ Approve", callback_data=f"man_appr_{order_id}"), InlineKeyboardButton("❌ Deny", callback_data=f"man_deny_{order_id}")).row(InlineKeyboardButton("💬 Chat with User", url=c_url))
         try:
@@ -596,7 +628,6 @@ def handle_all_messages(message):
                 channel_id = message.forward_from_chat.id
             elif message.text:
                 text = message.text.strip()
-                # t.me/c/12345/1 format parsing
                 match = re.search(r"t\.me/c/(\d+)", text)
                 if match:
                     channel_id = int(f"-100{match.group(1)}")
@@ -607,16 +638,21 @@ def handle_all_messages(message):
                 return bot.send_message(ADMIN_ID, "❌ कृपया किसी Private Channel/Group की लिंक भेजें (जैसे https://t.me/c/123456.../1) या मैसेज फॉरवर्ड करें।")
             
             try:
+                chat_info = bot.get_chat(channel_id)
+                channel_name = chat_info.title if chat_info.title else "Private Channel"
+
                 link = bot.create_chat_invite_link(channel_id, creates_join_request=True)
                 secret_text = f"👉 <b>Click here to join the Group/Channel:</b>\n{link.invite_link}"
                 cid = "c_" + str(uuid.uuid4())[:6]
+                
                 courses_col.update_one({"course_id": cid}, {"$set": {
                     "course_id": cid, "promo_media": admin_data[ADMIN_ID]["promo"], "amount": admin_data[ADMIN_ID]["amount"],
-                    "custom_caption": admin_data[ADMIN_ID].get("caption", ""), "secret_text": secret_text, "channel_id": channel_id
+                    "custom_caption": admin_data[ADMIN_ID].get("caption", ""), "secret_text": secret_text, "channel_id": channel_id,
+                    "channel_name": channel_name
                 }}, upsert=True)
                 
                 if admin_data[ADMIN_ID].get("mode") == "single":
-                    bot.send_message(ADMIN_ID, f"🎉 <b>Channel Pack created!</b>\n👉 <code>https://t.me/{bot.get_me().username}?start={cid}</code>", parse_mode="HTML")
+                    bot.send_message(ADMIN_ID, f"🎉 <b>Channel Pack created! ({channel_name})</b>\n👉 <code>https://t.me/{bot.get_me().username}?start={cid}</code>", parse_mode="HTML")
                     del admin_data[ADMIN_ID]
                     send_admin_panel(ADMIN_ID)
                 elif admin_data[ADMIN_ID].get("mode") == "batch":
@@ -821,7 +857,11 @@ def handle_buttons(call):
                 "offer_id": off_code, "status": "PENDING", "created_at_str": get_ist_time(), "created_at": time.time(), "created_at_dt": datetime.now(timezone.utc), "channel_msg_id": None
             }
             d_log = f"\n🎟 <b>Offer Applied:</b> {disc_pct}% OFF" if disc_pct else ""
-            ch_txt = f"🟡 <b>[ORDER INITIATED - QR]</b>\n\n👤 <b>User:</b> {u_men}\n🔖 <b>Order:</b> <code>{order_id}</code>\n💰 <b>Amount:</b> ₹{amt_key}{d_log}\n⏳ <b>Status:</b> ⏳ पेंडिंग"
+            
+            # 📌 Adding Channel Name to Initial QR Pending Alert
+            ch_name_display = f"\n📺 <b>Channel:</b> {course.get('channel_name')}" if course.get("channel_name") else f"\n📚 <b>Pack:</b> <code>{course_id}</code>"
+            ch_txt = f"🟡 <b>[ORDER INITIATED - QR]</b>\n\n👤 <b>User:</b> {u_men}\n🔖 <b>Order:</b> <code>{order_id}</code>{ch_name_display}\n💰 <b>Amount:</b> ₹{amt_key}{d_log}\n⏳ <b>Status:</b> ⏳ पेंडिंग"
+            
             try:
                 ch_msg = bot.send_message(DB_CHANNEL_ID, ch_txt, reply_markup=InlineKeyboardMarkup().row(InlineKeyboardButton("💬 Chat", url=f"tg://user?id={call.from_user.id}")), parse_mode="HTML")
                 o_data["channel_msg_id"] = ch_msg.message_id
@@ -1102,7 +1142,15 @@ def api_broadcast():
 @app.route("/dashboard/api/channel-logs")
 @require_auth
 def api_channel_logs():
-    return jsonify([{"user_id": l["user_id"], "course": l["course_id"], "status": l["status"], "date": l["date"]} for l in channel_logs_col.find().sort("_id", -1).limit(100)])
+    return jsonify([{
+        "user_id": l["user_id"], 
+        "first_name": l.get("first_name", "Unknown"),
+        "username": l.get("username", "None"),
+        "course": l["course_id"], 
+        "channel_name": l.get("channel_name", "Unknown Channel"), 
+        "status": l["status"], 
+        "date": l["date"]
+    } for l in channel_logs_col.find().sort("_id", -1).limit(100)])
 
 @app.route("/dashboard/api/sms-pool")
 @require_auth
@@ -1200,7 +1248,7 @@ async function load(){
       <button onclick="sendBc()">🚀 Send to All Users</button></div>`;
   } else if(curTab==="logs"){
     r=await fetch("/dashboard/api/channel-logs"); let o=await r.json();
-    document.getElementById("list").innerHTML = o.map(x=>`<div class="item ${x.status==='APPROVED'?'ok':'expired'}"><div class="main"><div class="name">User: <span class="mono">${x.user_id}</span></div><div class="sub">Pack: ${x.course} · ${x.date}</div></div><div style="font-weight:bold; color:var(--${x.status==='APPROVED'?'ok':'danger'})">${x.status}</div></div>`).join("")||"No logs yet.";
+    document.getElementById("list").innerHTML = o.map(x=>`<div class="item ${x.status==='APPROVED'?'ok':'expired'}"><div class="main"><div class="name">${x.first_name} (@${x.username}) - <span class="mono">${x.user_id}</span></div><div class="sub">📺 Channel: <b style="color:var(--text)">${x.channel_name}</b></div><div class="sub">Pack: ${x.course} · ${x.date}</div></div><div style="font-weight:bold; color:var(--${x.status==='APPROVED'?'ok':'danger'})">${x.status}</div></div>`).join("")||"No logs yet.";
   } else if(curTab==="sms"){
     r=await fetch("/dashboard/api/sms-pool"); let o=await r.json();
     document.getElementById("list").innerHTML = o.map(x=>`<div class="item pending"><div class="main"><div class="name">₹${x.amount}</div><div class="sub mono">${x.preview}</div></div><div><div class="sub">${x.created_at}</div></div></div>`).join("")||"No SMS.";
