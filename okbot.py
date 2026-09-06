@@ -37,27 +37,16 @@ SMS_HOOK_SECRET = os.environ.get("SMS_HOOK_SECRET")
 CHAT_LINK = os.environ.get("CHAT_LINK")
 INTERNATIONAL_LINK = os.environ.get("INTERNATIONAL_LINK")
 
-# 🔒 Content Protection Toggle (Render से True/False कंट्रोल करें)
 PROTECT_CONTENT = os.environ.get("PROTECT_CONTENT", "False").strip().lower() == "true"
-
-# 🕐 QR Expiry Time — Render पर "QR_EXPIRY_MINUTES" env variable से control करें (default 10 min)
 QR_EXPIRY_SECONDS = int(os.environ.get("QR_EXPIRY_MINUTES", "10")) * 60
-INACTIVITY_CLEANUP_SECONDS = 86400   # 24 घंटे
-
-# 🗑️ पुराने EXPIRED orders कब तक SMS से match हो सकते हैं (default 24 घंटे) — Render env "STALE_ORDER_HOURS"
+INACTIVITY_CLEANUP_SECONDS = 86400
 STALE_ORDER_SECONDS = int(os.environ.get("STALE_ORDER_HOURS", "24")) * 3600
-
-# 🗑️ Unmatched SMS pool records कितनी देर DB में रहें, फिर अपने-आप delete (Render env "SMS_POOL_TTL_HOURS", default 5h)
 SMS_POOL_TTL_HOURS = int(os.environ.get("SMS_POOL_TTL_HOURS", "5"))
-
-# 🗑️ Order records (completed/expired सब) कितनी देर DB में रहें, फिर अपने-आप delete (Render env "ORDER_TTL_HOURS", default 48h)
 ORDER_TTL_HOURS = int(os.environ.get("ORDER_TTL_HOURS", "48"))
 
-# 📊 Dashboard login — Render पर "DASHBOARD_USERNAME" और "DASHBOARD_PASSWORD" env variables ज़रूर सेट करें
 DASHBOARD_USERNAME = os.environ.get("DASHBOARD_USERNAME", "admin")
 DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "changeme123")
 
-# ज़रूरी वेरिएबल्स चेक करें
 try:
     ADMIN_ID = int(os.environ.get("ADMIN_ID"))
     DB_CHANNEL_ID = int(os.environ.get("DB_CHANNEL_ID"))
@@ -66,17 +55,14 @@ except (TypeError, ValueError):
     sys.exit(1)
 
 if not BOT_TOKEN or not MONGO_URI or not UPI_ID or not SMS_HOOK_SECRET:
-    print("❌ ERROR: कोई महत्वपूर्ण Environment Variable (BOT_TOKEN, MONGO_URI, UPI_ID, SMS_HOOK_SECRET) मिसिंग है।")
+    print("❌ ERROR: कोई महत्वपूर्ण Environment Variable मिसिंग है।")
     sys.exit(1)
 
 bot = telebot.TeleBot(BOT_TOKEN)
-
-# 🇮🇳 IST Timezone
 IST = timezone(timedelta(hours=5, minutes=30))
 
 def get_ist_time():
     return datetime.now(IST).strftime("%d-%m-%Y %I:%M:%S %p")
-
 
 # ==========================================
 # 🍃 MONGODB SETUP
@@ -90,15 +76,12 @@ try:
     purchases_col = db["purchases"]
     file_links_col = db["file_links"]
     settings_col = db["settings"]
-    orders_col = db["orders"]          # लाइव ऑर्डर और 5 घंटे की मेमोरी
-    sms_pool_col = db["sms_pool"]      # SMS बफर पूल
-    offers_col = db["offers"]          # डिस्काउंट ऑफर्स
+    orders_col = db["orders"]
+    sms_pool_col = db["sms_pool"]
+    offers_col = db["offers"]
 
-    # ऑटो-डिलीट (TTL): SMS pool "SMS_POOL_TTL_HOURS" में और orders "ORDER_TTL_HOURS" में डिलीट होंगे
     try:
         sms_pool_col.create_index("created_at_dt", expireAfterSeconds=SMS_POOL_TTL_HOURS * 3600)
-        # ⚠️ पहले यहाँ "created_at_dt" field इस्तेमाल हो रहा था जो orders में कभी set ही नहीं होता था
-        # (order में सिर्फ "created_at" epoch-float होता है) -> इसलिए ये TTL कभी काम ही नहीं कर रहा था, orders हमेशा DB में पड़े रहते थे।
         orders_col.create_index("created_at_dt", expireAfterSeconds=ORDER_TTL_HOURS * 3600)
     except Exception:
         pass
@@ -107,20 +90,15 @@ except Exception as e:
     print(f"❌ MongoDB Error: {e}")
     sys.exit(1)
 
-
 # ==========================================
 # 📝 TEXT FORMATTING & ACTIVITY TRACKER
 # ==========================================
 def get_formatted_text(message):
-    if hasattr(message, "html_text") and message.html_text:
-        return message.html_text
-    if hasattr(message, "html_caption") and message.html_caption:
-        return message.html_caption
+    if hasattr(message, "html_text") and message.html_text: return message.html_text
+    if hasattr(message, "html_caption") and message.html_caption: return message.html_caption
     return message.caption or message.text or ""
 
-user_chat_messages = {}
-user_inactivity_timers = {}
-tracker_lock = threading.Lock()
+user_chat_messages, user_inactivity_timers, tracker_lock = {}, {}, threading.Lock()
 
 def clear_inactive_chat(chat_id):
     with tracker_lock:
@@ -155,14 +133,9 @@ bot.send_photo = lambda cid, *a, **kw: register_activity(cid, orig_send_photo(ci
 bot.send_video = lambda cid, *a, **kw: register_activity(cid, orig_send_video(cid, *a, **kw).message_id) or orig_send_video(cid, *a, **kw)
 bot.send_document = lambda cid, *a, **kw: register_activity(cid, orig_send_document(cid, *a, **kw).message_id) or orig_send_document(cid, *a, **kw)
 
-
-# ==========================================
-# 💳 UPI QR कोड जनरेटर
-# ==========================================
 def generate_upi_qr(amount, order_id):
     clean_amt = re.sub(r"[^\d.]", "", str(amount))
     upi_url = f"upi://pay?pa={UPI_ID}&pn={MERCHANT_NAME}&am={clean_amt}&cu=INR&tn=Order_{order_id}"
-
     qr = qrcode.QRCode(version=None, error_correction=qrcode.constants.ERROR_CORRECT_H, box_size=10, border=2)
     qr.add_data(upi_url)
     qr.make(fit=True)
@@ -172,13 +145,10 @@ def generate_upi_qr(amount, order_id):
     box_x, box_y = (w - box_w) // 2, (h - box_h) // 2
     draw = ImageDraw.Draw(qr_img)
     draw.rounded_rectangle([box_x, box_y, box_x + box_w, box_y + box_h], radius=6, fill="#ffffff", outline="#0b1329", width=2)
-
     lw = max(2, int(box_h * 0.12))
     let_w, let_h, gap = box_w * 0.18, box_h * 0.45, box_w * 0.08
     start_x = box_x + (box_w - ((let_w * 2) + gap * 2 + lw)) // 2
     start_y = box_y + (box_h - let_h) // 2
-
-    # U, P, I Drawing logic
     u_x = start_x
     draw.line([(u_x, start_y), (u_x, start_y + let_h)], fill="#097939", width=lw)
     draw.line([(u_x, start_y + let_h), (u_x + let_w, start_y + let_h)], fill="#097939", width=lw)
@@ -190,19 +160,12 @@ def generate_upi_qr(amount, order_id):
     draw.line([(p_x + let_w, start_y + let_h // 2), (p_x, start_y + let_h // 2)], fill="#F37021", width=lw)
     i_x = p_x + let_w + gap + lw // 2
     draw.line([(i_x, start_y), (i_x, start_y + let_h)], fill="#1a73e8", width=lw)
-
     bio = io.BytesIO()
     qr_img.save(bio, "PNG")
     bio.seek(0)
     return bio, clean_amt
 
-
-# --- इन-मेमोरी स्टेट्स ---
-admin_data = {}
-user_states = {}
-user_qr_messages = {}
-pending_orders = {}
-all_orders_cache = {}
+admin_data, user_states, user_qr_messages, pending_orders, all_orders_cache = {}, {}, {}, {}, {}
 pending_lock = threading.Lock()
 
 def generate_unique_amount(base_amount):
@@ -216,14 +179,9 @@ def generate_unique_amount(base_amount):
             if candidate not in pending_orders: return candidate
         return f"{base_clean + (random.randint(1, 99) / 100):.2f}"
 
-
-# ==========================================
-# 🔄 लाइव चैनल स्टेटस अपडेटर
-# ==========================================
 def update_channel_order_status(order, status_type, extra_text=""):
     channel_msg_id = order.get("channel_msg_id")
     if not channel_msg_id: return
-
     user_mention = order.get("user_mention", f"User ({order['user_id']})")
     discount_info = f"\n🎟 <b>Offer Applied:</b> {order.get('discount_percent')}% OFF (Original: ₹{order.get('original_amount')})" if order.get("discount_percent") else ""
 
@@ -241,19 +199,14 @@ def update_channel_order_status(order, status_type, extra_text=""):
 def expire_qr(chat_id, message_id, course_id, amount_key, order_id):
     order = all_orders_cache.get(order_id) or orders_col.find_one({"order_id": order_id})
     if not order: return
+    if order.get("status") in ("COMPLETED_AUTO", "COMPLETED_MANUAL"): return
 
-    # पहले से ही deliver हो चुका है (last-moment SMS आ गया था) -> कुछ मत करो
-    if order.get("status") in ("COMPLETED_AUTO", "COMPLETED_MANUAL"):
-        return
-
-    # ⏳ Expire होने से ठीक पहले एक आखिरी बार SMS पूल में match चेक करें
     sms_rec = sms_pool_col.find_one({"amount": amount_key, "status": "UNUSED"})
     if sms_rec:
         sms_pool_col.update_one({"_id": sms_rec["_id"]}, {"$set": {"status": "PROCESSED"}})
         deliver_course_to_buyer(order, sms_text=sms_rec.get("raw_text"), is_manual=False)
         return
 
-    # ❌ Payment match नहीं मिली -> order को EXPIRED मार्क करें
     order["status"] = "EXPIRED"
     orders_col.update_one({"order_id": order_id}, {"$set": {"status": "EXPIRED"}})
     update_channel_order_status(order, "EXPIRED")
@@ -263,10 +216,8 @@ def expire_qr(chat_id, message_id, course_id, amount_key, order_id):
     try: bot.delete_message(chat_id, message_id)
     except Exception: pass
 
-    # 📸 Match नहीं मिला -> "Verify Payment" button दें (मौजूदा paydone_ handler ही आगे संभालेगा)
     markup = InlineKeyboardMarkup().row(InlineKeyboardButton("✅ Verify Payment", callback_data=f"paydone_{order_id}"))
-    try:
-        bot.send_message(chat_id, "⏳ <b>Time's up!</b>\n\nAgar aapne payment kar diya hai, to neeche <b>'✅ Verify Payment'</b> dabayein.", reply_markup=markup, parse_mode="HTML")
+    try: bot.send_message(chat_id, "⏳ <b>Time's up!</b>\n\nAgar aapne payment kar diya hai, to neeche <b>'✅ Verify Payment'</b> dabayein.", reply_markup=markup, parse_mode="HTML")
     except Exception: pass
 
 def deliver_course_to_buyer(order, sms_text=None, is_manual=False):
@@ -279,21 +230,18 @@ def deliver_course_to_buyer(order, sms_text=None, is_manual=False):
     with pending_lock: pending_orders.pop(order.get("amount"), None)
     if user_id in user_states and user_states[user_id].get("order_id") == order_id: del user_states[user_id]
     
-    # QR Delete logic (Updated)
     qr_msg_id = user_qr_messages.get(chat_id) or order.get("qr_msg_id")
     if qr_msg_id:
         try: bot.delete_message(chat_id, qr_msg_id)
         except Exception: pass
-    if chat_id in user_qr_messages:
-        del user_qr_messages[chat_id]
+    if chat_id in user_qr_messages: del user_qr_messages[chat_id]
 
     if not course:
         try: bot.send_message(chat_id, "⚠️ Payment verify ho gayi hai, par pack nahi mila. Admin se sampark karein.")
         except Exception: pass
         return
 
-    try:
-        bot.send_message(chat_id, f"🎉 <b>Payment Verified Successfully!</b>\n\n{course['secret_text']}", parse_mode="HTML", protect_content=PROTECT_CONTENT)
+    try: bot.send_message(chat_id, f"🎉 <b>Payment Verified Successfully!</b>\n\n{course['secret_text']}", parse_mode="HTML", protect_content=PROTECT_CONTENT)
     except Exception: pass
 
     date_now = get_ist_time()
@@ -302,19 +250,13 @@ def deliver_course_to_buyer(order, sms_text=None, is_manual=False):
     if order.get("offer_id"): offers_col.update_one({"offer_code": order["offer_id"]}, {"$inc": {"used_count": 1}})
     update_channel_order_status(order, "MANUAL_APPROVED" if is_manual else "AUTO_VERIFIED", extra_text=sms_text or "")
 
-    # अगर screenshot पहले ही manual-approval के लिए भेजा जा चुका था, तो वो मैसेज resolve कर दें
-    # ताकि admin दोबारा approve/deny ना कर सके (delayed SMS ने पहले ही deliver कर दिया)
     manual_msg_id = order.get("manual_msg_id")
     if manual_msg_id and not is_manual:
         try:
             bot.edit_message_reply_markup(DB_CHANNEL_ID, manual_msg_id, reply_markup=None)
-            orig_send_message(DB_CHANNEL_ID, f"✅ <b>ORDER {order_id} ऑटोमैटिक रूप से वेरिफाई और डिलीवर हो गया</b> (delayed SMS मिल गया, manual approval की ज़रूरत नहीं थी)।", parse_mode="HTML")
+            orig_send_message(DB_CHANNEL_ID, f"✅ <b>ORDER {order_id} ऑटोमैटिक रूप से वेरिफाई और डिलीवर हो गया</b> (delayed SMS मिल गया)।", parse_mode="HTML")
         except Exception: pass
 
-
-# ==========================================
-# ⏱️ बैकग्राउंड चेकर
-# ==========================================
 def background_order_checker(order_id, amount_str, max_seconds=None):
     total = max_seconds if max_seconds is not None else QR_EXPIRY_SECONDS
     iterations = max(1, total // 20)
@@ -329,7 +271,36 @@ def background_order_checker(order_id, amount_str, max_seconds=None):
             break
 
 # ==========================================
-# 🛑 कोर्स डिलीवरी एवं प्लान मेन्यू
+# 🛑 GATEKEEPER: CHANNEL JOIN REQUEST HANDLER
+# ==========================================
+@bot.chat_join_request_handler()
+def handle_join_request(message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    
+    course = courses_col.find_one({"channel_id": chat_id})
+    if not course:
+        try: bot.decline_chat_join_request(chat_id, user_id)
+        except Exception: pass
+        return
+        
+    course_id = course["course_id"]
+    purchase = purchases_col.find_one({"user_id": user_id, "item_info": {"$regex": course_id}})
+    
+    if purchase:
+        try: 
+            bot.approve_chat_join_request(chat_id, user_id)
+            orig_send_message(user_id, f"✅ <b>Request Approved!</b>\nWelcome to the channel.", parse_mode="HTML")
+        except Exception: pass
+    else:
+        try:
+            bot.decline_chat_join_request(chat_id, user_id)
+            orig_send_message(user_id, f"❌ <b>Access Denied!</b>\nYou haven't purchased this pack yet. Please buy it from the bot first.", parse_mode="HTML")
+            orig_send_message(ADMIN_ID, f"⚠️ <b>Unauthorized Access Blocked</b>\nUser: <a href='tg://user?id={user_id}'>{user_id}</a> tried to join without payment.\nChannel: <code>{chat_id}</code>", parse_mode="HTML")
+        except Exception: pass
+
+# ==========================================
+# 🛑 मेन्यू और सेंडिंग
 # ==========================================
 def send_course_to_user(chat_id, course):
     raw_promo = course.get("promo_media", [])
@@ -409,9 +380,8 @@ def send_admin_panel(chat_id):
     markup.row(InlineKeyboardButton("👥 User Info", callback_data="admin_user_info"))
     bot.send_message(chat_id, "🛠 <b>Admin Panel</b>\nPlease select an option:\n", reply_markup=markup, parse_mode="HTML")
 
-
 # ==========================================
-# 1. कमांड्स
+# COMMANDS & HANDLERS
 # ==========================================
 @bot.message_handler(commands=["start"])
 def start_command(message):
@@ -423,34 +393,30 @@ def start_command(message):
     if param.startswith("off_"):
         offer = offers_col.find_one({"offer_code": param})
         if not offer:
-            bot.send_message(user_id, "❌ <b>This offer is invalid or has expired.</b>\n<i>Yeh offer invalid hai ya expire ho chuka hai.</i>", parse_mode="HTML")
+            bot.send_message(user_id, "❌ <b>This offer is invalid or has expired.</b>", parse_mode="HTML")
             return send_custom_start_menu(user_id)
         now_ts = time.time()
         if offer.get("expires_at_ts") and now_ts > offer["expires_at_ts"]:
-            bot.send_message(user_id, "⏳ <b>This offer has expired!</b>\n<i>Yeh offer expire ho chuka hai!</i>", parse_mode="HTML")
+            bot.send_message(user_id, "⏳ <b>This offer has expired!</b>", parse_mode="HTML")
             return send_custom_start_menu(user_id)
         if offer.get("max_users", -1) != -1 and offer.get("used_count", 0) >= offer["max_users"]:
-            bot.send_message(user_id, "⚠️ <b>This offer has reached its maximum claim limit!</b>\n<i>Is offer ki maximum limit khatam ho chuki hai!</i>", parse_mode="HTML")
+            bot.send_message(user_id, "⚠️ <b>This offer has reached its maximum claim limit!</b>", parse_mode="HTML")
             return send_custom_start_menu(user_id)
-
         users_col.update_one({"user_id": user_id}, {"$set": {"active_offer": offer}}, upsert=True)
-        bot.send_message(user_id, f"🎉 <b>Congrats! {offer['discount_percent']}% discount activated!</b>\n<i>Badhai ho! {offer['discount_percent']}% ka discount activate ho gaya hai!</i>\n\nThis will apply on {'all courses' if offer['target_type'] == 'all' else 'a specific course (' + offer['target_course_id'] + ')'}.\n<i>Yeh discount {'sabhi courses' if offer['target_type'] == 'all' else 'ek specific course (' + offer['target_course_id'] + ')'} par lagu hoga.</i>", parse_mode="HTML")
+        bot.send_message(user_id, f"🎉 <b>Congrats! {offer['discount_percent']}% discount activated!</b>", parse_mode="HTML")
         if offer["target_type"] == "single":
             c = courses_col.find_one({"course_id": offer["target_course_id"]})
             if c: send_course_to_user(user_id, c)
             else: send_custom_start_menu(user_id)
         else: send_custom_start_menu(user_id)
-
     elif param.startswith("b_"):
         batch = batches_col.find_one({"batch_id": param})
         if batch: send_batch_to_user(user_id, batch)
         else: bot.send_message(user_id, "❌ <b>This link has expired.</b>", parse_mode="HTML")
-
     elif param.startswith("c_"):
         course = courses_col.find_one({"course_id": param})
         if course: send_course_to_user(user_id, course)
         else: bot.send_message(user_id, "❌ <b>This link is not available.</b>", parse_mode="HTML")
-
     elif param.startswith("f_"):
         file_data = file_links_col.find_one({"file_code": param})
         if file_data:
@@ -474,37 +440,30 @@ def start_command(message):
                 try:
                     sent = orig_send_media_group(user_id, m_group, protect_content=PROTECT_CONTENT)
                     for m in sent: register_activity(user_id, m.message_id)
-                    if btns or any(i["type"] == "text" for i in m_items): bot.send_message(user_id, "👇 <b>Check the link(s) below:</b>", reply_markup=markup, parse_mode="HTML")
+                    if btns or any(i["type"] == "text" for i in m_items): bot.send_message(user_id, "👇", reply_markup=markup, parse_mode="HTML")
                 except Exception as e: bot.send_message(user_id, f"❌ Error: {e}")
         else: bot.send_message(user_id, "❌ <b>File not found or expired.</b>", parse_mode="HTML")
     else:
         if user_id == ADMIN_ID: send_admin_panel(user_id)
         else: send_custom_start_menu(user_id)
 
-
-# ==========================================
-# 2. मैसेज हैंडलर (एडमिन + स्क्रीनशॉट)
-# ==========================================
 @bot.message_handler(content_types=["photo", "video", "document", "text"])
 def handle_all_messages(message):
     user_id = message.chat.id
     register_activity(user_id, message.message_id)
 
-    # 📸 यूज़र पेमेंट स्क्रीनशॉट
     if user_id in user_states and user_states[user_id].get("step") == "WAITING_PAYMENT_SS":
         order_id = user_states[user_id].get("order_id")
         order = all_orders_cache.get(order_id) or orders_col.find_one({"order_id": order_id})
         if not message.photo and not message.document:
-            bot.send_message(user_id, "❌ <b>Please send your screenshot as a photo or document.</b>\n<i>Kripya screenshot photo ya document mein bhejein.</i>", parse_mode="HTML")
+            bot.send_message(user_id, "❌ <b>Please send your screenshot as a photo or document.</b>", parse_mode="HTML")
             return
         fid = message.photo[-1].file_id if message.photo else message.document.file_id
-        bot.send_message(user_id, "⏳ <b>Verification pending...</b>\n<i>Verification pending hai...</i>\n\nYour screenshot has been sent to admin.\n<i>Aapka screenshot admin ko bhej diya gaya hai.</i>", parse_mode="HTML")
+        bot.send_message(user_id, "⏳ <b>Verification pending...</b>\nYour screenshot has been sent to admin.", parse_mode="HTML")
         del user_states[user_id]
-
         u_str = f"@{message.from_user.username}" if message.from_user.username else "No Username"
         u_men = f"<a href='tg://user?id={user_id}'>{message.from_user.first_name}</a> ({u_str})"
         cap = f"📩 <b>[MANUAL APPROVAL - PAYMENT SCREENSHOT]</b>\n\n👤 <b>User:</b> {u_men}\n🆔 <b>ID:</b> <code>{user_id}</code>\n🔖 <b>Order:</b> <code>{order_id}</code>\n📚 <b>Pack:</b> <code>{order['course_id'] if order else 'N/A'}</code>\n💰 <b>Amount:</b> ₹{order['amount'] if order else 'N/A'}\n⏰ <b>Time:</b> {get_ist_time()}"
-        
         c_url = f"https://t.me/{message.from_user.username}" if message.from_user.username else f"tg://user?id={user_id}"
         m_admin = InlineKeyboardMarkup().row(InlineKeyboardButton("✅ Approve", callback_data=f"man_appr_{order_id}"), InlineKeyboardButton("❌ Deny", callback_data=f"man_deny_{order_id}")).row(InlineKeyboardButton("💬 Chat with User", url=c_url))
         try:
@@ -515,76 +474,62 @@ def handle_all_messages(message):
         except Exception as e: orig_send_message(ADMIN_ID, f"❌ Channel error: {e}")
         return
 
-    # --- ADMIN WORKFLOWS ---
     if user_id == ADMIN_ID and user_id in admin_data:
         step = admin_data[ADMIN_ID].get("step")
-
         if step == "DELETE_COURSE":
             cid = message.text.strip()
             if courses_col.delete_one({"course_id": cid}).deleted_count:
                 settings_col.update_one({"_id": "store_plans"}, {"$pull": {"course_ids": cid}})
-                bot.send_message(ADMIN_ID, f"✅ <b>कोर्स <code>{cid}</code> डिलीट कर दिया गया है!</b>", parse_mode="HTML")
-            else: bot.send_message(ADMIN_ID, f"❌ <b>कोर्स <code>{cid}</code> नहीं मिला।</b>", parse_mode="HTML")
+                bot.send_message(ADMIN_ID, f"✅ <b>Course <code>{cid}</code> Deleted!</b>", parse_mode="HTML")
+            else: bot.send_message(ADMIN_ID, f"❌ <b>Not found.</b>", parse_mode="HTML")
             del admin_data[ADMIN_ID]
             return send_admin_panel(ADMIN_ID)
-
         elif step == "ADD_PLAN_ID":
             cid = message.text.strip()
             if courses_col.find_one({"course_id": cid}):
                 settings_col.update_one({"_id": "store_plans"}, {"$addToSet": {"course_ids": cid}}, upsert=True)
-                bot.send_message(ADMIN_ID, f"✅ <b>कोर्स <code>{cid}</code> स्टोर प्लान में जोड़ दिया गया है!</b>", parse_mode="HTML")
-            else: bot.send_message(ADMIN_ID, f"❌ <b>यह कोर्स ID उपलब्ध नहीं है।</b>", parse_mode="HTML")
+                bot.send_message(ADMIN_ID, f"✅ <b>Course <code>{cid}</code> added to Store Plans!</b>", parse_mode="HTML")
+            else: bot.send_message(ADMIN_ID, f"❌ <b>Invalid ID.</b>", parse_mode="HTML")
             del admin_data[ADMIN_ID]
             return send_admin_panel(ADMIN_ID)
-
         elif step == "OFFER_DISCOUNT":
             try:
                 disc = int(re.sub(r"[^\d]", "", message.text.strip()))
                 if not (1 <= disc <= 100): raise ValueError()
-                admin_data[ADMIN_ID]["discount"] = disc
-                admin_data[ADMIN_ID]["step"] = "OFFER_TARGET"
-                m = InlineKeyboardMarkup().row(InlineKeyboardButton("🌐 सभी कोर्सेज पर", callback_data="offtarget_all")).row(InlineKeyboardButton("🎯 किसी एक कोर्स पर", callback_data="offtarget_single"))
-                bot.send_message(ADMIN_ID, f"✅ डिस्काउंट <b>{disc}%</b> सेट हो गया!\nअब चुनें कि यह किस पर लागू होगा:", reply_markup=m, parse_mode="HTML")
-            except Exception: bot.send_message(ADMIN_ID, "❌ कृपया 1 से 100 के बीच एक सही प्रतिशत लिखें।")
+                admin_data[ADMIN_ID]["discount"], admin_data[ADMIN_ID]["step"] = disc, "OFFER_TARGET"
+                m = InlineKeyboardMarkup().row(InlineKeyboardButton("🌐 All Courses", callback_data="offtarget_all")).row(InlineKeyboardButton("🎯 Single Course", callback_data="offtarget_single"))
+                bot.send_message(ADMIN_ID, f"✅ Discount <b>{disc}%</b> set!\nApply to:", reply_markup=m, parse_mode="HTML")
+            except Exception: bot.send_message(ADMIN_ID, "❌ 1 to 100 only.")
             return
-
         elif step == "OFFER_SINGLE_CID":
             cid = message.text.strip()
-            if not courses_col.find_one({"course_id": cid}):
-                return bot.send_message(ADMIN_ID, "❌ <b>यह कोर्स ID नहीं मिली। सही ID भेजें:</b>", parse_mode="HTML")
-            admin_data[ADMIN_ID]["target_course_id"] = cid
-            admin_data[ADMIN_ID]["step"] = "OFFER_LIMIT"
-            bot.send_message(ADMIN_ID, "👥 <b>यह ऑफर कितने यूजर्स के लिए है?</b>\n(असीमित के लिए 0 लिखें):", parse_mode="HTML")
+            if not courses_col.find_one({"course_id": cid}): return bot.send_message(ADMIN_ID, "❌ <b>Course ID not found. Send correct ID:</b>", parse_mode="HTML")
+            admin_data[ADMIN_ID]["target_course_id"], admin_data[ADMIN_ID]["step"] = cid, "OFFER_LIMIT"
+            bot.send_message(ADMIN_ID, "👥 <b>Max users?</b> (0 for unlimited):", parse_mode="HTML")
             return
-
         elif step == "OFFER_LIMIT":
             try:
                 lim = int(re.sub(r"[^\d]", "", message.text.strip()))
-                admin_data[ADMIN_ID]["max_users"] = -1 if lim == 0 else lim
-                admin_data[ADMIN_ID]["step"] = "OFFER_HOURS"
-                bot.send_message(ADMIN_ID, "⏳ <b>यह ऑफर कितने घंटों तक एक्टिव रहेगा?</b> (जैसे 24 या 48):", parse_mode="HTML")
-            except Exception: bot.send_message(ADMIN_ID, "❌ कृपया एक सही संख्या लिखें।")
+                admin_data[ADMIN_ID]["max_users"], admin_data[ADMIN_ID]["step"] = -1 if lim == 0 else lim, "OFFER_HOURS"
+                bot.send_message(ADMIN_ID, "⏳ <b>Active for how many hours?</b> (e.g. 24 or 48):", parse_mode="HTML")
+            except Exception: bot.send_message(ADMIN_ID, "❌ Invalid number.")
             return
-
         elif step == "OFFER_HOURS":
             try:
                 hrs = float(re.sub(r"[^\d.]", "", message.text.strip()))
                 off_code, now_ts = "off_" + str(uuid.uuid4())[:6], time.time()
-                exp_str = (datetime.now(IST) + timedelta(hours=hrs)).strftime("%d-%m-%Y %I:%M %p")
                 doc = {
                     "offer_code": off_code, "discount_percent": admin_data[ADMIN_ID]["discount"],
                     "target_type": admin_data[ADMIN_ID]["target_type"], "target_course_id": admin_data[ADMIN_ID].get("target_course_id"),
                     "max_users": admin_data[ADMIN_ID]["max_users"], "used_count": 0, "created_at_ts": now_ts,
-                    "expires_at_ts": now_ts + (hrs * 3600), "expires_str": exp_str
+                    "expires_at_ts": now_ts + (hrs * 3600), "expires_str": (datetime.now(IST) + timedelta(hours=hrs)).strftime("%d-%m-%Y %I:%M %p")
                 }
                 offers_col.insert_one(doc)
-                l = f"https://t.me/{bot.get_me().username}?start={off_code}"
-                bot.send_message(ADMIN_ID, f"🎉 <b>डिस्काउंट ऑफर लिंक बन गया!</b>\n\n🎟 <b>Discount:</b> {doc['discount_percent']}%\n👉 <code>{l}</code>", parse_mode="HTML")
+                bot.send_message(ADMIN_ID, f"🎉 <b>Discount Offer Link Created!</b>\n👉 <code>https://t.me/{bot.get_me().username}?start={off_code}</code>", parse_mode="HTML")
                 del admin_data[ADMIN_ID]
                 send_admin_panel(ADMIN_ID)
-            except Exception: bot.send_message(ADMIN_ID, "❌ कृपया घंटों की सही संख्या भेजें।")
+            except Exception: bot.send_message(ADMIN_ID, "❌ Invalid hours.")
             return
-
         elif step == "MENU_CUSTOM_CONTENT":
             mt, fid = "text", None
             if message.photo: mt, fid = "photo", message.photo[-1].file_id
@@ -592,9 +537,8 @@ def handle_all_messages(message):
             admin_data[ADMIN_ID]["menu_content"] = {"media_type": mt, "file_id": fid, "text": get_formatted_text(message)}
             admin_data[ADMIN_ID]["buttons"], admin_data[ADMIN_ID]["step"] = [], "MENU_ADD_BUTTONS"
             m = InlineKeyboardMarkup().row(InlineKeyboardButton("🚀 Finish & Save", callback_data="menu_finish_save"))
-            bot.send_message(ADMIN_ID, "✅ <b>Content Saved!</b>\nबटन जोड़ें: <code>Button Name - Link</code> या Finish दबाएं।", reply_markup=m, parse_mode="HTML")
+            bot.send_message(ADMIN_ID, "✅ <b>Content Saved!</b>\nAdd buttons: <code>Button Name - Link</code> or Finish.", reply_markup=m, parse_mode="HTML")
             return
-
         elif step == "MENU_ADD_BUTTONS":
             txt = message.text.strip()
             if " - " in txt:
@@ -605,7 +549,6 @@ def handle_all_messages(message):
                     bot.send_message(ADMIN_ID, f"✅ <b>Button Added! ({len(admin_data[ADMIN_ID]['buttons'])})</b>", reply_markup=m, parse_mode="HTML")
                 except Exception: bot.send_message(ADMIN_ID, "❌ Format error. <code>Name - Link</code>", parse_mode="HTML")
             return
-
         elif step == "PROMO":
             mt, fid = "text", None
             if message.photo: mt, fid = "photo", message.photo[-1].file_id
@@ -614,7 +557,6 @@ def handle_all_messages(message):
             m = InlineKeyboardMarkup().row(InlineKeyboardButton("➡️ Next Step (Price)", callback_data="next_price"))
             bot.send_message(ADMIN_ID, f"✅ <b>{mt.capitalize()} saved!</b>", reply_markup=m, parse_mode="HTML")
             return
-
         elif step == "AMOUNT":
             amt = re.sub(r"[^\d.]", "", message.text.strip())
             if not amt: return bot.send_message(ADMIN_ID, "❌ <b>Numbers only.</b>", parse_mode="HTML")
@@ -622,18 +564,14 @@ def handle_all_messages(message):
             m = InlineKeyboardMarkup().row(InlineKeyboardButton("⏭ Skip (No Caption)", callback_data="skip_caption"))
             bot.send_message(ADMIN_ID, f"✅ <b>Price ₹{amt} saved!</b>\n📝 Type optional extra caption, or skip:", reply_markup=m, parse_mode="HTML")
             return
-
         elif step == "CAPTION":
-            admin_data[ADMIN_ID]["caption"], admin_data[ADMIN_ID]["step"] = get_formatted_text(message), "SECRET"
-            bot.send_message(ADMIN_ID, "✅ <b>Caption saved!</b>\n🔗 Now send final secret link or content:", parse_mode="HTML")
+            admin_data[ADMIN_ID]["caption"], admin_data[ADMIN_ID]["step"] = get_formatted_text(message), "COURSE_TYPE"
+            m = InlineKeyboardMarkup().row(InlineKeyboardButton("📝 Text / Secret Link", callback_data="ctype_text"), InlineKeyboardButton("📢 Private Channel", callback_data="ctype_channel"))
+            bot.send_message(ADMIN_ID, "✅ <b>Caption saved!</b>\nWhat will the user get after payment?", reply_markup=m, parse_mode="HTML")
             return
-
         elif step == "SECRET":
             cid = "c_" + str(uuid.uuid4())[:6]
-            courses_col.update_one({"course_id": cid}, {"$set": {"course_id": cid, "promo_media": admin_data[ADMIN_ID]["promo"], "amount": admin_data[ADMIN_ID]["amount"], "custom_caption": admin_data[ADMIN_ID]["caption"], "secret_text": get_formatted_text(message)}}, upsert=True)
-            try: bot.send_message(DB_CHANNEL_ID, f"🆕 <b>[NEW COURSE CREATED]</b>\n\n🆔 <code>{cid}</code>\n💰 ₹{admin_data[ADMIN_ID]['amount']}\n📝 {admin_data[ADMIN_ID].get('caption') or 'None'}", parse_mode="HTML")
-            except Exception: pass
-            
+            courses_col.update_one({"course_id": cid}, {"$set": {"course_id": cid, "promo_media": admin_data[ADMIN_ID]["promo"], "amount": admin_data[ADMIN_ID]["amount"], "custom_caption": admin_data[ADMIN_ID].get("caption",""), "secret_text": get_formatted_text(message)}}, upsert=True)
             if admin_data[ADMIN_ID].get("mode") == "single":
                 bot.send_message(ADMIN_ID, f"🎉 <b>Pack created!</b>\n👉 <code>https://t.me/{bot.get_me().username}?start={cid}</code>", parse_mode="HTML")
                 del admin_data[ADMIN_ID]
@@ -644,13 +582,36 @@ def handle_all_messages(message):
                 m = InlineKeyboardMarkup().row(InlineKeyboardButton("➕ Add Another", callback_data="batch_add_next")).row(InlineKeyboardButton("✅ Finish Batch", callback_data="batch_finish"))
                 bot.send_message(ADMIN_ID, f"✅ <b>Pack saved!</b>", reply_markup=m, parse_mode="HTML")
             return
-
+        elif step == "CHANNEL_ID":
+            if not message.forward_from_chat or message.forward_from_chat.type != "channel":
+                return bot.send_message(ADMIN_ID, "❌ Please forward a message from the private channel.")
+            channel_id = message.forward_from_chat.id
+            try:
+                link = bot.create_chat_invite_link(channel_id, creates_join_request=True)
+                secret_text = f"👉 <b>Click here to join the channel:</b>\n{link.invite_link}"
+                cid = "c_" + str(uuid.uuid4())[:6]
+                courses_col.update_one({"course_id": cid}, {"$set": {
+                    "course_id": cid, "promo_media": admin_data[ADMIN_ID]["promo"], "amount": admin_data[ADMIN_ID]["amount"],
+                    "custom_caption": admin_data[ADMIN_ID].get("caption", ""), "secret_text": secret_text, "channel_id": channel_id
+                }}, upsert=True)
+                
+                if admin_data[ADMIN_ID].get("mode") == "single":
+                    bot.send_message(ADMIN_ID, f"🎉 <b>Channel Pack created!</b>\n👉 <code>https://t.me/{bot.get_me().username}?start={cid}</code>", parse_mode="HTML")
+                    del admin_data[ADMIN_ID]
+                    send_admin_panel(ADMIN_ID)
+                elif admin_data[ADMIN_ID].get("mode") == "batch":
+                    admin_data[ADMIN_ID]["course_ids"].append(cid)
+                    admin_data[ADMIN_ID]["step"] = "NEXT_ACTION"
+                    m = InlineKeyboardMarkup().row(InlineKeyboardButton("➕ Add Another", callback_data="batch_add_next")).row(InlineKeyboardButton("✅ Finish Batch", callback_data="batch_finish"))
+                    bot.send_message(ADMIN_ID, f"✅ <b>Pack saved!</b>", reply_markup=m, parse_mode="HTML")
+            except Exception as e:
+                bot.send_message(ADMIN_ID, f"❌ Error: Make sure the bot is an Admin in the channel first! ({e})")
+            return
         elif step == "TITLE":
             admin_data[ADMIN_ID]["title"], admin_data[ADMIN_ID]["step"], admin_data[ADMIN_ID]["promo"] = message.text.strip(), "PROMO", []
             m = InlineKeyboardMarkup().row(InlineKeyboardButton("➡️ Next Step", callback_data="next_price"))
             bot.send_message(ADMIN_ID, f"✅ Title saved. <b>Send promo media/text:</b>", reply_markup=m, parse_mode="HTML")
             return
-            
         elif step in ["BC_MEDIA", "FTL_MEDIA"]:
             mt, fid = "text", None
             if message.photo: mt, fid = "photo", message.photo[-1].file_id
@@ -661,7 +622,6 @@ def handle_all_messages(message):
             m = InlineKeyboardMarkup().row(InlineKeyboardButton("✅ Done Adding", callback_data=cb))
             bot.send_message(ADMIN_ID, "✅ <b>Saved!</b> Send another or click Done.", reply_markup=m, parse_mode="HTML")
             return
-
         elif step in ["BC_BUTTONS", "FTL_BUTTONS"]:
             txt = message.text.strip()
             if " - " in txt:
@@ -674,10 +634,6 @@ def handle_all_messages(message):
                 except Exception: bot.send_message(ADMIN_ID, "❌ Format Error.", parse_mode="HTML")
             return
 
-
-# ==========================================
-# 3. कॉलबैक बटन्स हैंडलर
-# ==========================================
 @bot.callback_query_handler(func=lambda call: True)
 def handle_buttons(call):
     data, chat_id, msg_id = call.data, call.message.chat.id, call.message.message_id
@@ -687,35 +643,45 @@ def handle_buttons(call):
         bot.answer_callback_query(call.id)
         plans = settings_col.find_one({"_id": "store_plans"})
         c_ids = plans.get("course_ids", []) if plans else [c["course_id"] for c in courses_col.find().limit(10)]
-        if not c_ids: return bot.send_message(chat_id, "ℹ️ कोई प्लान उपलब्ध नहीं है।", parse_mode="HTML")
-        bot.send_message(chat_id, "📚 <b>उपलब्ध कोर्सेज/प्लान्स:</b>", parse_mode="HTML")
+        if not c_ids: return bot.send_message(chat_id, "ℹ️ No plans available.", parse_mode="HTML")
+        bot.send_message(chat_id, "📚 <b>Available Plans:</b>", parse_mode="HTML")
         for cid in c_ids:
             c = courses_col.find_one({"course_id": cid})
             if c: send_course_to_user(chat_id, c)
         return
-
+    if data == "ctype_text":
+        admin_data[ADMIN_ID]["step"] = "SECRET"
+        bot.edit_message_text("✅ <b>Send final secret link or text content:</b>", chat_id, msg_id, parse_mode="HTML")
+        return
+    if data == "ctype_channel":
+        admin_data[ADMIN_ID]["step"] = "CHANNEL_ID"
+        bot.edit_message_text("📢 <b>Forward any message from the private channel to me:</b>\n<i>(Make sure I am added as an Admin in that channel first!)</i>", chat_id, msg_id, parse_mode="HTML")
+        return
+    if data == "skip_caption" and ADMIN_ID in admin_data:
+        admin_data[ADMIN_ID]["caption"], admin_data[ADMIN_ID]["step"] = "", "COURSE_TYPE"
+        m = InlineKeyboardMarkup().row(InlineKeyboardButton("📝 Text / Secret Link", callback_data="ctype_text"), InlineKeyboardButton("📢 Private Channel", callback_data="ctype_channel"))
+        bot.edit_message_text("✅ <b>What will the user get after payment?</b>", chat_id=chat_id, message_id=msg_id, reply_markup=m, parse_mode="HTML")
+        return
     if data == "admin_create_offer":
         bot.answer_callback_query(call.id)
         admin_data[ADMIN_ID] = {"step": "OFFER_DISCOUNT"}
-        bot.edit_message_text("🎟 <b>डिस्काउंट ऑफर बनाएं:</b>\nकितने प्रतिशत का डिस्काउंट देना है? (जैसे 50):", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
+        bot.edit_message_text("🎟 <b>Create Discount Offer:</b>\nEnter % (e.g. 50):", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
         return
     elif data == "offtarget_all":
         bot.answer_callback_query(call.id)
         admin_data[ADMIN_ID]["target_type"], admin_data[ADMIN_ID]["step"] = "all", "OFFER_LIMIT"
-        bot.edit_message_text("👥 <b>ऑफर कितने यूजर्स क्लेम कर सकते हैं?</b> (0 = असीमित):", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
+        bot.edit_message_text("👥 <b>Max claims?</b> (0 = unlimited):", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
         return
     elif data == "offtarget_single":
         bot.answer_callback_query(call.id)
         admin_data[ADMIN_ID]["target_type"], admin_data[ADMIN_ID]["step"] = "single", "OFFER_SINGLE_CID"
-        bot.edit_message_text("🎯 <b>कोर्स ID भेजें:</b> (e.g. <code>c_abc123</code>)", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
+        bot.edit_message_text("🎯 <b>Send Course ID:</b> (e.g. <code>c_abc123</code>)", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
         return
-
     if data == "admin_delete_course":
         bot.answer_callback_query(call.id)
         admin_data[ADMIN_ID] = {"step": "DELETE_COURSE"}
-        bot.edit_message_text("🗑 <b>कोर्स डिलीट करें:</b>\nCourse ID भेजें:", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
+        bot.edit_message_text("🗑 <b>Delete Course:</b>\nSend Course ID:", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
         return
-
     if data == "admin_manage_plans":
         bot.answer_callback_query(call.id)
         c_ids = (settings_col.find_one({"_id": "store_plans"}) or {}).get("course_ids", [])
@@ -726,20 +692,19 @@ def handle_buttons(call):
     elif data == "plan_add_id":
         bot.answer_callback_query(call.id)
         admin_data[ADMIN_ID] = {"step": "ADD_PLAN_ID"}
-        bot.edit_message_text("➕ लिस्ट में जोड़ने के लिए <b>Course ID</b> भेजें:", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
+        bot.edit_message_text("➕ Send <b>Course ID</b> to add:", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
         return
     elif data == "plan_clear_all":
         settings_col.delete_one({"_id": "store_plans"})
-        bot.answer_callback_query(call.id, "सभी प्लान्स रीसेट कर दिए गए हैं!", show_alert=True)
+        bot.answer_callback_query(call.id, "All plans cleared!", show_alert=True)
         return send_admin_panel(chat_id)
-
     if data == "admin_custom_menu":
         m = InlineKeyboardMarkup().row(InlineKeyboardButton("✏️ Set New", callback_data="menu_set_new")).row(InlineKeyboardButton("🗑 Reset Default", callback_data="menu_reset_default")).row(InlineKeyboardButton("🔙 Back", callback_data="back_to_admin"))
         bot.edit_message_text("🎨 <b>Customize Start Menu</b>", chat_id=chat_id, message_id=msg_id, reply_markup=m, parse_mode="HTML")
         return
     elif data == "menu_set_new":
         admin_data[ADMIN_ID] = {"step": "MENU_CUSTOM_CONTENT"}
-        bot.edit_message_text("📝 <b>Start Menu Content</b>\nफ़ोटो, वीडियो या टेक्स्ट भेजें:", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
+        bot.edit_message_text("📝 <b>Start Menu Content</b>\nSend Photo, Video or Text:", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
         return
     elif data == "menu_finish_save":
         c = admin_data.get(ADMIN_ID, {}).get("menu_content", {})
@@ -751,19 +716,11 @@ def handle_buttons(call):
         settings_col.delete_one({"_id": "start_menu"})
         bot.edit_message_text("✅ <b>Reset!</b>", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
         return send_admin_panel(chat_id)
-
     if data.startswith("paydone_"):
         oid = data.replace("paydone_", "")
         order = all_orders_cache.get(oid) or orders_col.find_one({"order_id": oid})
-        if not order:
-            bot.answer_callback_query(call.id, "❌ Order not found.", show_alert=True)
-            return
-
-        # पहले से डिलीवर हो चुका है तो दोबारा कुछ ना करें
-        if order.get("status") in ("COMPLETED_AUTO", "COMPLETED_MANUAL"):
-            bot.answer_callback_query(call.id, "✅ This order has already been delivered. / Yeh order pehle hi deliver ho chuka hai.", show_alert=True)
-            return
-
+        if not order: return bot.answer_callback_query(call.id, "❌ Order not found.", show_alert=True)
+        if order.get("status") in ("COMPLETED_AUTO", "COMPLETED_MANUAL"): return bot.answer_callback_query(call.id, "✅ Already delivered.", show_alert=True)
         bot.answer_callback_query(call.id, "⏳ Checking...", show_alert=False)
         amt_key = order.get("amount")
         sms_rec = sms_pool_col.find_one({"amount": amt_key, "status": "UNUSED"})
@@ -771,26 +728,22 @@ def handle_buttons(call):
             sms_pool_col.update_one({"_id": sms_rec["_id"]}, {"$set": {"status": "PROCESSED"}})
             deliver_course_to_buyer(order, sms_text=sms_rec.get("raw_text"), is_manual=False)
             return
-
-        # SMS पूल में मैच नहीं मिला -> मैन्युअल स्क्रीनशॉट वेरिफिकेशन पर भेजें
         user_states[chat_id] = {"step": "WAITING_PAYMENT_SS", "order_id": oid}
         markup = InlineKeyboardMarkup().row(InlineKeyboardButton("📸 Send Screenshot", callback_data=f"send_ss_{oid}"))
-        try:
-            bot.send_message(chat_id, "❌ <b>Your payment hasn't been received yet.</b>\n<i>Abhi tak aapki payment nahi mili hai.</i>\n\nPlease send your payment screenshot, we'll verify it manually.\n<i>Kripya apna payment screenshot bhejein, hum manually verify kar denge.</i>", reply_markup=markup, parse_mode="HTML")
+        try: bot.send_message(chat_id, "❌ <b>Your payment hasn't been received yet.</b>\nPlease send screenshot to verify manually.", reply_markup=markup, parse_mode="HTML")
         except Exception: pass
         return
-
     if data.startswith("send_ss_"):
         bot.answer_callback_query(call.id)
         user_states[chat_id] = {"step": "WAITING_PAYMENT_SS", "order_id": data.replace("send_ss_", "")}
-        bot.send_message(chat_id, "📸 <b>Please send your payment screenshot.</b>\n<i>Kripya apni payment ka screenshot bhejein.</i>", parse_mode="HTML")
+        bot.send_message(chat_id, "📸 <b>Please send your payment screenshot.</b>", parse_mode="HTML")
         return
     if data.startswith("man_appr_"):
         oid = data.replace("man_appr_", "")
         o = all_orders_cache.get(oid) or orders_col.find_one({"order_id": oid})
         if not o: return bot.answer_callback_query(call.id, "❌ Order not found.", show_alert=True)
         if o.get("status") in ("COMPLETED_AUTO", "COMPLETED_MANUAL"):
-            bot.answer_callback_query(call.id, "ℹ️ यह ऑर्डर पहले ही (SMS से) डिलीवर हो चुका है।", show_alert=True)
+            bot.answer_callback_query(call.id, "ℹ️ Already delivered via SMS.", show_alert=True)
             try: bot.edit_message_reply_markup(chat_id, msg_id, reply_markup=None)
             except Exception: pass
             return
@@ -806,12 +759,12 @@ def handle_buttons(call):
         o = all_orders_cache.get(oid) or orders_col.find_one({"order_id": oid})
         if not o: return bot.answer_callback_query(call.id, "❌ Not found.", show_alert=True)
         if o.get("status") in ("COMPLETED_AUTO", "COMPLETED_MANUAL"):
-            bot.answer_callback_query(call.id, "ℹ️ यह ऑर्डर पहले ही (SMS से) डिलीवर हो चुका है, deny नहीं किया जा सकता।", show_alert=True)
+            bot.answer_callback_query(call.id, "ℹ️ Already delivered.", show_alert=True)
             try: bot.edit_message_reply_markup(chat_id, msg_id, reply_markup=None)
             except Exception: pass
             return
         m = InlineKeyboardMarkup().row(InlineKeyboardButton("💬 Contact Admin", url=CHAT_LINK)) if CHAT_LINK else None
-        try: bot.send_message(o["chat_id"], f"❌ <b>Payment Failed!</b>\nOrder <code>{oid}</code> has been rejected.\n<i>Order <code>{oid}</code> reject kar diya gaya hai.</i>", reply_markup=m, parse_mode="HTML")
+        try: bot.send_message(o["chat_id"], f"❌ <b>Payment Failed!</b>\nOrder <code>{oid}</code> rejected.", reply_markup=m, parse_mode="HTML")
         except Exception: pass
         bot.answer_callback_query(call.id, "❌ Rejected.", show_alert=True)
         try:
@@ -819,8 +772,6 @@ def handle_buttons(call):
             orig_send_message(chat_id, f"❌ <b>ORDER {oid} REJECTED</b>", reply_to_message_id=msg_id, parse_mode="HTML")
         except Exception: pass
         return
-
-    # 💳 UPI पेमेंट जनरेटर
     if data.startswith("pay_upi_"):
         bot.answer_callback_query(call.id, "⏳ Generating Fresh QR...", show_alert=False)
         course_id = data.replace("pay_upi_", "")
@@ -831,11 +782,9 @@ def handle_buttons(call):
                 if chat_id in user_qr_messages:
                     try: bot.delete_message(chat_id, user_qr_messages.pop(chat_id))
                     except Exception: pass
-
             base_price = float(course["amount"])
             active_off = (users_col.find_one({"user_id": call.from_user.id}) or {}).get("active_offer")
             disc_pct, off_code, final_base = None, None, base_price
-
             if active_off:
                 now_ts = time.time()
                 valid_e = not (active_off.get("expires_at_ts") and now_ts > active_off["expires_at_ts"])
@@ -844,25 +793,19 @@ def handle_buttons(call):
                 if valid_e and valid_l and valid_t:
                     disc_pct, off_code = active_off["discount_percent"], active_off["offer_code"]
                     final_base = round(base_price * (1.0 - (disc_pct / 100.0)), 2)
-
             order_id, amt_key = str(uuid.uuid4())[:8], generate_unique_amount(final_base)
             u_men = f"<a href='tg://user?id={call.from_user.id}'>{call.from_user.first_name}</a> (@{call.from_user.username or ''})"
-            
             o_data = {
                 "order_id": order_id, "course_id": course_id, "user_id": call.from_user.id, "chat_id": chat_id,
                 "user_mention": u_men, "amount": amt_key, "original_amount": str(base_price), "discount_percent": disc_pct,
-                "offer_id": off_code, "status": "PENDING", "created_at_dt": datetime.now(timezone.utc),
-                "created_at_str": get_ist_time(), "created_at": time.time(), "created_at_dt": datetime.now(timezone.utc), "channel_msg_id": None
+                "offer_id": off_code, "status": "PENDING", "created_at_str": get_ist_time(), "created_at": time.time(), "created_at_dt": datetime.now(timezone.utc), "channel_msg_id": None
             }
-
-            d_log = f"\n🎟 <b>Offer Applied:</b> {disc_pct}% OFF (Original: ₹{base_price})" if disc_pct else ""
-            ch_txt = f"🟡 <b>[ORDER INITIATED - QR]</b>\n\n👤 <b>User:</b> {u_men}\n🆔 <b>ID:</b> <code>{call.from_user.id}</code>\n🔖 <b>Order:</b> <code>{order_id}</code>\n📚 <b>Pack:</b> <code>{course_id}</code>\n💰 <b>Amount:</b> ₹{amt_key}{d_log}\n⏰ <b>Time:</b> {get_ist_time()}\n⏳ <b>Status:</b> ⏳ पेमेंट का इंतज़ार है"
-            c_url = f"https://t.me/{call.from_user.username}" if call.from_user.username else f"tg://user?id={call.from_user.id}"
+            d_log = f"\n🎟 <b>Offer Applied:</b> {disc_pct}% OFF" if disc_pct else ""
+            ch_txt = f"🟡 <b>[ORDER INITIATED - QR]</b>\n\n👤 <b>User:</b> {u_men}\n🔖 <b>Order:</b> <code>{order_id}</code>\n💰 <b>Amount:</b> ₹{amt_key}{d_log}\n⏳ <b>Status:</b> ⏳ पेंडिंग"
             try:
-                ch_msg = bot.send_message(DB_CHANNEL_ID, ch_txt, reply_markup=InlineKeyboardMarkup().row(InlineKeyboardButton("💬 Chat", url=c_url)), parse_mode="HTML")
+                ch_msg = bot.send_message(DB_CHANNEL_ID, ch_txt, reply_markup=InlineKeyboardMarkup().row(InlineKeyboardButton("💬 Chat", url=f"tg://user?id={call.from_user.id}")), parse_mode="HTML")
                 o_data["channel_msg_id"] = ch_msg.message_id
             except Exception: pass
-
             orders_col.insert_one(o_data.copy())
             with pending_lock:
                 pending_orders[amt_key] = o_data
@@ -875,19 +818,12 @@ def handle_buttons(call):
                 return deliver_course_to_buyer(o_data, sms_text=sms_rec.get("raw_text"), is_manual=False)
 
             qr_img_bio, clean_amt = generate_upi_qr(amt_key, order_id)
-            inv = f"👤 <b>User:</b> {call.from_user.first_name}\n🆔 <b>Order:</b> <code>{order_id}</code>\n📅 <b>Time:</b> {get_ist_time()}\n💰 <b>Amount:</b> ₹{clean_amt}\n"
-            if disc_pct: inv += f"🎉 <i>Discount: {disc_pct}% OFF (₹{base_price} ➔ ₹{clean_amt})</i>\n"
-            if course.get("custom_caption"): inv += f"\n📝 {course['custom_caption']}\n"
-            inv += f"\n⚠️ <b>Exact Amount Pay Karein.</b>\n⏳ <i>QR {QR_EXPIRY_SECONDS // 60} min mein expire hoga.</i>\n\n🤖 <i>auto-verifies your payment.</i>\n🤖 <i>aap payment kijiye aapko mil jeaega</i>"
-
+            inv = f"👤 <b>User:</b> {call.from_user.first_name}\n🆔 <b>Order:</b> <code>{order_id}</code>\n💰 <b>Amount:</b> ₹{clean_amt}\n⚠️ <b>Exact Amount Pay Karein.</b>\n⏳ <i>QR {QR_EXPIRY_SECONDS // 60} min mein expire hoga.</i>"
             m = InlineKeyboardMarkup()
             if CHAT_LINK: m.row(InlineKeyboardButton("💬 Chat with Admin", url=CHAT_LINK))
             sent_msg = bot.send_photo(chat_id, photo=qr_img_bio, caption=inv, reply_markup=m, parse_mode="HTML")
             user_qr_messages[chat_id] = sent_msg.message_id
-            
-            # QR मैसेज की ID डेटाबेस में सेव करें
             orders_col.update_one({"order_id": order_id}, {"$set": {"qr_msg_id": sent_msg.message_id}})
-
             threading.Timer(QR_EXPIRY_SECONDS, expire_qr, args=(chat_id, sent_msg.message_id, course_id, amt_key, order_id)).start()
             threading.Thread(target=background_order_checker, args=(order_id, amt_key), daemon=True).start()
         return
@@ -905,9 +841,6 @@ def handle_buttons(call):
     elif data == "next_price" and ADMIN_ID in admin_data:
         admin_data[ADMIN_ID]["step"] = "AMOUNT"
         bot.edit_message_text("💰 <b>Step 2/4: Price (INR)</b>", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
-    elif data == "skip_caption" and ADMIN_ID in admin_data:
-        admin_data[ADMIN_ID]["caption"], admin_data[ADMIN_ID]["step"] = "", "SECRET"
-        bot.edit_message_text("✅ <b>Step 4/4: Secret Link/Text</b>", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
     elif data == "batch_add_next":
         admin_data[ADMIN_ID]["step"], admin_data[ADMIN_ID]["promo"], admin_data[ADMIN_ID]["caption"] = "PROMO", [], ""
         bot.edit_message_text("📝 <b>Send promo for next pack:</b>", chat_id=chat_id, message_id=msg_id, reply_markup=InlineKeyboardMarkup().row(InlineKeyboardButton("➡️ Next", callback_data="next_price")), parse_mode="HTML")
@@ -957,7 +890,6 @@ def handle_buttons(call):
                 else:
                     m_group = [InputMediaPhoto(it["file_id"], caption=it["caption"], parse_mode="HTML") if it["type"] == "photo" else InputMediaVideo(it["file_id"], caption=it["caption"], parse_mode="HTML") if it["type"] == "video" else InputMediaDocument(it["file_id"], caption=it["caption"], parse_mode="HTML") for it in m_items]
                     sent = orig_send_media_group(uid, m_group)
-                    for sg in sent: register_activity(uid, sg.message_id)
                     if btns or any(i["type"] == "text" for i in m_items): bot.send_message(uid, "👇", reply_markup=m, parse_mode="HTML")
                 success += 1
             except Exception: pass
@@ -974,24 +906,21 @@ def handle_buttons(call):
         del admin_data[ADMIN_ID]
         send_admin_panel(ADMIN_ID)
 
-
 # ==========================================
-# 4. Flask Web Server & SMS Webhook (GET + POST)
+# FLASK WEB SERVER & API
 # ==========================================
 app = Flask(__name__)
 AMOUNT_RE_DECIMAL = re.compile(r"(?:Rs\.?|₹|INR)\s?([\d,]+\.\d{2})", re.IGNORECASE)
 AMOUNT_RE_INT = re.compile(r"(?:Rs\.?|₹|INR)\s?([\d,]+)(?!\.\d)", re.IGNORECASE)
 
 @app.route("/")
-def home():
-    return "Telegram Bot API Running."
+def home(): return "Telegram Bot API Running."
 
 @app.route("/sms-webhook/<secret>", methods=["GET", "POST"])
 def sms_webhook(secret):
     if secret != SMS_HOOK_SECRET: return "forbidden", 403
     sms_text = (request.get_json(silent=True) or request.form).get("text", "").strip() if request.method == "POST" else request.args.get("text", "").strip()
     if not sms_text: return "no 'text' param", 400
-
     m = AMOUNT_RE_DECIMAL.search(sms_text)
     has_dec = bool(m)
     if not m: m = AMOUNT_RE_INT.search(sms_text)
@@ -999,7 +928,6 @@ def sms_webhook(secret):
 
     amt_str = m.group(1).replace(",", "")
     f_round = f"{float(amt_str):.2f}" if not has_dec else amt_str
-
     sms_pool_col.insert_one({"amount": f_round, "raw_text": sms_text, "status": "UNUSED", "created_at_dt": datetime.now(timezone.utc), "created_at_str": get_ist_time()})
 
     order, amb = None, False
@@ -1016,16 +944,12 @@ def sms_webhook(secret):
         sms_pool_col.update_one({"amount": f_round, "status": "UNUSED"}, {"$set": {"status": "PROCESSED"}})
         deliver_course_to_buyer(order, sms_text=sms_text, is_manual=False)
         return "matched", 200
-
     if amb:
         try: orig_send_message(DB_CHANNEL_ID, f"⚠️ <b>Ambiguous</b> ₹{amt_str}\n📩 <code>{sms_text[:300]}</code>", parse_mode="HTML")
         except Exception: pass
         return "ambiguous", 200
     return "saved_to_pool", 200
 
-# ==========================================
-# 📊 PAYMENT DASHBOARD
-# ==========================================
 def require_auth(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
@@ -1035,9 +959,7 @@ def require_auth(f):
         return f(*args, **kwargs)
     return wrapper
 
-def _strip_html(s):
-    return re.sub(r"<[^>]*>", "", s or "").strip()
-
+def _strip_html(s): return re.sub(r"<[^>]*>", "", s or "").strip()
 def _order_ts(o):
     if o.get("delivered_at_ts"): return o["delivered_at_ts"]
     ds = o.get("delivered_at")
@@ -1046,148 +968,99 @@ def _order_ts(o):
         except Exception: pass
     return o.get("created_at", 0)
 
-def _ist_day_start(days_back=0):
-    now_ist = datetime.now(IST)
-    start = now_ist.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days_back)
-    return start.timestamp()
-
 @app.route("/dashboard/api/overview")
 @require_auth
 def api_overview():
-    now = time.time()
     completed_q = {"status": {"$in": ["COMPLETED_AUTO", "COMPLETED_MANUAL"]}}
-    today_start, week_start = _ist_day_start(0), _ist_day_start(6)
-    today_amt = week_amt = 0.0
-    for o in orders_col.find(completed_q, {"amount": 1, "delivered_at": 1, "delivered_at_ts": 1, "created_at": 1}):
-        ts = _order_ts(o)
-        amt = float(o.get("amount", 0) or 0)
-        if ts >= week_start: week_amt += amt
-        if ts >= today_start: today_amt += amt
-
+    today_start = (datetime.now(IST).replace(hour=0, minute=0, second=0, microsecond=0)).timestamp()
+    today_amt = sum(float(o.get("amount", 0) or 0) for o in orders_col.find(completed_q) if _order_ts(o) >= today_start)
+    
     return jsonify({
-        "total_users": users_col.count_documents({}),
-        "total_qr_generated": orders_col.count_documents({}),
-        "active_pending": orders_col.count_documents({"status": "PENDING"}),
-        "completed_total": orders_col.count_documents(completed_q),
-        "expired_total": orders_col.count_documents({"status": "EXPIRED"}),
-        "pending_sms": sms_pool_col.count_documents({"status": "UNUSED"}),
-        "today_amount": round(today_amt, 2),
-        "week_amount": round(week_amt, 2),
-        "qr_expiry_minutes": QR_EXPIRY_SECONDS // 60,
-        "sms_pool_ttl_hours": SMS_POOL_TTL_HOURS,
-        "order_ttl_hours": ORDER_TTL_HOURS,
-        "stale_order_hours": STALE_ORDER_SECONDS // 3600,
+        "total_users": users_col.count_documents({}), "total_qr_generated": orders_col.count_documents({}),
+        "active_pending": orders_col.count_documents({"status": "PENDING"}), "completed_total": orders_col.count_documents(completed_q),
+        "expired_total": orders_col.count_documents({"status": "EXPIRED"}), "pending_sms": sms_pool_col.count_documents({"status": "UNUSED"}),
+        "today_amount": round(today_amt, 2)
     })
 
 @app.route("/dashboard/api/orders")
 @require_auth
 def api_orders():
-    status_filter = request.args.get("status", "all")
-    q = {}
-    if status_filter == "pending": q = {"status": "PENDING"}
-    elif status_filter == "completed": q = {"status": {"$in": ["COMPLETED_AUTO", "COMPLETED_MANUAL"]}}
-    elif status_filter == "expired": q = {"status": "EXPIRED"}
-
+    st = request.args.get("status", "all")
+    q = {"status": "PENDING"} if st == "pending" else {"status": {"$in": ["COMPLETED_AUTO", "COMPLETED_MANUAL"]}} if st == "completed" else {"status": "EXPIRED"} if st == "expired" else {}
     now = time.time()
     out = []
     for o in orders_col.find(q).sort("created_at", -1).limit(300):
-        remaining = None
-        if o.get("status") == "PENDING":
-            remaining = max(0, int(QR_EXPIRY_SECONDS - (now - o.get("created_at", now))))
-        method = {"COMPLETED_AUTO": "Auto (SMS matched)", "COMPLETED_MANUAL": "Manual (screenshot approved)"}.get(o.get("status"))
+        remaining = max(0, int(QR_EXPIRY_SECONDS - (now - o.get("created_at", now)))) if o.get("status") == "PENDING" else None
         out.append({
-            "order_id": o.get("order_id"), "user": _strip_html(o.get("user_mention", "")),
-            "user_id": o.get("user_id"), "course_id": o.get("course_id"), "amount": o.get("amount"),
-            "status": o.get("status"), "created_at": o.get("created_at_str"),
-            "delivered_at": o.get("delivered_at"), "remaining_seconds": remaining, "method": method,
+            "order_id": o.get("order_id"), "user": _strip_html(o.get("user_mention", "")), "course_id": o.get("course_id"), 
+            "amount": o.get("amount"), "status": o.get("status"), "created_at": o.get("created_at_str"),
+            "remaining_seconds": remaining, "method": {"COMPLETED_AUTO": "Auto SMS", "COMPLETED_MANUAL": "Manual"}.get(o.get("status")),
+            "has_screenshot": bool(o.get("manual_msg_id"))
         })
     return jsonify(out)
+
+@app.route("/dashboard/api/orders/<order_id>/approve", methods=["POST"])
+@require_auth
+def api_approve_order(order_id):
+    order = orders_col.find_one({"order_id": order_id})
+    if order and order.get("status") in ["PENDING", "EXPIRED"]:
+        deliver_course_to_buyer(order, sms_text="Dashboard Approved", is_manual=True)
+        return jsonify({"status": "success"})
+    return jsonify({"status": "error"}), 400
+
+@app.route("/dashboard/api/courses", methods=["GET"])
+@require_auth
+def api_courses():
+    out = []
+    for c in courses_col.find().sort("_id", -1):
+        out.append({"course_id": c.get("course_id"), "amount": c.get("amount"), "caption": c.get("custom_caption", "")[:40], "is_channel": bool(c.get("channel_id"))})
+    return jsonify(out)
+
+@app.route("/dashboard/api/courses/<course_id>", methods=["DELETE"])
+@require_auth
+def api_delete_course(course_id):
+    courses_col.delete_one({"course_id": course_id})
+    settings_col.update_one({"_id": "store_plans"}, {"$pull": {"course_ids": course_id}})
+    return jsonify({"status": "success"})
 
 @app.route("/dashboard/api/sms-pool")
 @require_auth
 def api_sms_pool():
-    now_dt = datetime.now(timezone.utc)
-    out = []
-    for s in sms_pool_col.find({"status": "UNUSED"}).sort("created_at_dt", -1).limit(300):
-        created = s.get("created_at_dt")
-        elapsed = (now_dt - created).total_seconds() if created else 0
-        remaining = max(0, int(SMS_POOL_TTL_HOURS * 3600 - elapsed))
-        out.append({
-            "amount": s.get("amount"), "created_at": s.get("created_at_str"),
-            "remaining_seconds": remaining, "preview": (s.get("raw_text") or "")[:140],
-        })
-    return jsonify(out)
+    return jsonify([{"amount": s.get("amount"), "created_at": s.get("created_at_str"), "preview": (s.get("raw_text") or "")[:100]} for s in sms_pool_col.find({"status": "UNUSED"}).sort("created_at_dt", -1).limit(100)])
 
 @app.route("/dashboard/api/users")
 @require_auth
 def api_users():
-    out = []
-    for u in users_col.find().sort("updated_at", -1).limit(500):
-        off = u.get("active_offer") or {}
-        out.append({"user_id": u.get("user_id"), "updated_at": u.get("updated_at"), "active_offer": off.get("offer_code")})
-    return jsonify(out)
+    return jsonify([{"user_id": u.get("user_id"), "updated_at": u.get("updated_at")} for u in users_col.find().sort("updated_at", -1).limit(200)])
 
 DASHBOARD_HTML = """<!DOCTYPE html>
-<html lang="hi">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Payments Ledger</title>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Store Dashboard</title>
 <style>
-  :root{
-    --bg:#0F1512; --surface:#141C18; --row-hover:#1B2621; --line:#26332C;
-    --text:#EDF2EF; --muted:#8FA398;
-    --ok:#3ED9A0; --pending:#E8A94A; --danger:#E8695F;
-  }
-  *{box-sizing:border-box;}
-  body{margin:0; background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; font-size:15px;}
-  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}
-  header{padding:22px 20px 14px; display:flex; justify-content:space-between; align-items:baseline; border-bottom:1px solid var(--line);}
-  header h1{font-size:19px; font-weight:600; margin:0;}
-  header .clock{color:var(--muted); font-size:13px;}
-  .ledger{margin:16px 20px; border:1px solid var(--line); border-radius:6px; overflow:hidden;}
-  .ledger .row{display:flex; justify-content:space-between; align-items:center; padding:13px 16px; border-bottom:1px solid var(--line);}
-  .ledger .row:last-child{border-bottom:none;}
-  .ledger .label{color:var(--muted); font-size:13.5px;}
-  .ledger .value{font-size:17px; font-weight:600;}
-  .ledger-grid{display:grid; grid-template-columns:repeat(2,1fr);}
-  .ledger-grid .row{border-right:1px solid var(--line); flex-direction:column; align-items:flex-start; gap:4px;}
-  .ledger-grid .row:nth-child(2n){border-right:none;}
-  .tabs{display:flex; gap:22px; margin:22px 20px 0; border-bottom:1px solid var(--line);}
-  .tab{color:var(--muted); padding:8px 0; cursor:pointer; font-size:14px; border-bottom:2px solid transparent;}
+  :root{--bg:#0F1512; --surface:#141C18; --line:#26332C; --text:#EDF2EF; --muted:#8FA398; --ok:#3ED9A0; --pending:#E8A94A; --danger:#E8695F;}
+  *{box-sizing:border-box;} body{margin:0; background:var(--bg); color:var(--text); font-family:sans-serif; font-size:14px;}
+  .mono{font-family:monospace;}
+  header{padding:15px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between;}
+  .ledger{display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:10px; padding:15px;}
+  .ledger .row{background:var(--surface); padding:15px; border-radius:6px; border:1px solid var(--line);}
+  .tabs{display:flex; gap:15px; padding:10px 15px; border-bottom:1px solid var(--line); overflow-x:auto;}
+  .tab{color:var(--muted); cursor:pointer; padding-bottom:5px; border-bottom:2px solid transparent;}
   .tab.active{color:var(--text); border-bottom-color:var(--ok);}
-  .subtabs{display:flex; gap:14px; margin:14px 20px 0; overflow-x:auto;}
-  .subtab{color:var(--muted); font-size:13px; padding:5px 12px; border:1px solid var(--line); border-radius:20px; white-space:nowrap; cursor:pointer;}
-  .subtab.active{color:var(--bg); background:var(--ok); border-color:var(--ok);}
-  .list{margin:14px 20px 40px;}
-  .item{display:flex; gap:12px; align-items:center; padding:12px 14px; border-left:3px solid var(--line); background:var(--surface); border-radius:4px; margin-bottom:8px;}
-  .item.ok{border-left-color:var(--ok);}
-  .item.pending{border-left-color:var(--pending);}
-  .item.expired{border-left-color:var(--danger);}
-  .item .main{flex:1; min-width:0;}
-  .item .name{font-weight:600; font-size:14px;}
-  .item .sub{color:var(--muted); font-size:12.5px; margin-top:2px; word-break:break-all;}
-  .item .amt{font-size:15px; font-weight:600; white-space:nowrap;}
-  .item .timer{font-size:12.5px; color:var(--pending); white-space:nowrap;}
-  .empty{color:var(--muted); text-align:center; padding:40px 0; font-size:13.5px;}
-  @media (max-width:640px){
-    .ledger-grid{grid-template-columns:1fr;}
-    .ledger-grid .row{border-right:none;}
-    .item{flex-wrap:wrap;}
-    .item .amt{margin-left:auto;}
-  }
-</style>
-</head>
-<body>
-<header>
-  <h1>Payments Ledger</h1>
-  <div class="clock mono" id="clock">--:--:--</div>
-</header>
-
-<div class="ledger ledger-grid" id="overview"></div>
-
+  .subtabs{display:flex; gap:10px; padding:10px 15px;}
+  .subtab{color:var(--muted); padding:4px 10px; border:1px solid var(--line); border-radius:15px; cursor:pointer;}
+  .subtab.active{background:var(--ok); color:var(--bg); border-color:var(--ok);}
+  .list{padding:15px; padding-bottom:50px;}
+  .item{display:flex; justify-content:space-between; align-items:center; background:var(--surface); padding:10px; margin-bottom:8px; border-left:3px solid var(--line); border-radius:4px;}
+  .item.ok{border-color:var(--ok);} .item.pending{border-color:var(--pending);} .item.expired{border-color:var(--danger);}
+  .item .main{flex:1;} .item .name{font-weight:bold;} .item .sub{color:var(--muted); font-size:12px; margin-top:3px;}
+  .item .amt{font-size:15px; font-weight:bold;} .action-btn{background:var(--surface); color:var(--text); border:1px solid var(--line); padding:6px 10px; border-radius:4px; cursor:pointer; font-size:12px; margin-top:6px; display:inline-block;}
+  .ok-btn{border-color:var(--ok); color:var(--ok);} .danger-btn{border-color:var(--danger); color:var(--danger);}
+</style></head><body>
+<header><h2>Store Dashboard</h2><div id="clock" class="mono"></div></header>
+<div class="ledger" id="overview"></div>
 <div class="tabs">
   <div class="tab active" data-tab="orders">Orders</div>
+  <div class="tab" data-tab="courses">Courses</div>
   <div class="tab" data-tab="sms">SMS Pool</div>
   <div class="tab" data-tab="users">Users</div>
 </div>
@@ -1197,170 +1070,60 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div class="subtab" data-status="completed">Completed</div>
   <div class="subtab" data-status="expired">Expired</div>
 </div>
-<div class="list" id="list"><div class="empty">Loading…</div></div>
-
+<div class="list" id="list">Loading...</div>
 <script>
-let currentTab = "orders", currentStatus = "all";
-let liveData = [];
-
-function fmtSecs(s){
-  if(s == null) return "";
-  if(s <= 0) return "0s";
-  const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), sec = Math.floor(s%60);
-  if(h > 0) return h+"h "+m+"m";
-  if(m > 0) return m+"m "+sec+"s";
-  return sec+"s";
-}
-
-async function loadOverview(){
-  const r = await fetch("/dashboard/api/overview");
-  const d = await r.json();
-  document.getElementById("overview").innerHTML = `
-    <div class="row"><span class="label">Aaj ka collection</span><span class="value mono">₹${d.today_amount}</span></div>
-    <div class="row"><span class="label">Is hafte ka collection</span><span class="value mono">₹${d.week_amount}</span></div>
-    <div class="row"><span class="label">Active QR (abhi generate hue)</span><span class="value mono">${d.active_pending}</span></div>
-    <div class="row"><span class="label">Total completed orders</span><span class="value mono">${d.completed_total}</span></div>
-    <div class="row"><span class="label">Total expired orders</span><span class="value mono">${d.expired_total}</span></div>
-    <div class="row"><span class="label">Pending SMS (buffer me)</span><span class="value mono">${d.pending_sms}</span></div>
-    <div class="row"><span class="label">Total QR generate hue (all-time)</span><span class="value mono">${d.total_qr_generated}</span></div>
-    <div class="row"><span class="label">Total users (bot start kiya)</span><span class="value mono">${d.total_users}</span></div>
+let curTab="orders", curSt="all";
+function fmtSecs(s){ if(s<=0)return "0s"; let m=Math.floor(s/60), sec=s%60; return m+"m "+sec+"s"; }
+async function load(){
+  let r=await fetch("/dashboard/api/overview"), d=await r.json();
+  document.getElementById("overview").innerHTML=`
+    <div class="row">Today: <br><b class="mono" style="font-size:18px">₹${d.today_amount}</b></div>
+    <div class="row">Active QR: <b>${d.active_pending}</b><br>Pending SMS: <b>${d.pending_sms}</b></div>
+    <div class="row">Total Sales: <b>${d.completed_total}</b><br>Total Users: <b>${d.total_users}</b></div>
   `;
-}
-
-function renderOrders(data){
-  if(!data.length){ document.getElementById("list").innerHTML = '<div class="empty">Koi order nahi mila.</div>'; return; }
-  document.getElementById("list").innerHTML = data.map(o => {
-    const cls = o.status === "PENDING" ? "pending" : (o.status === "EXPIRED" ? "expired" : "ok");
-    const right = o.status === "PENDING"
-      ? `<div class="timer mono" data-remaining="${o.remaining_seconds}">${fmtSecs(o.remaining_seconds)} bacha</div>`
-      : `<div class="sub">${o.method || o.status}</div>`;
-    return `<div class="item ${cls}">
-      <div class="main">
-        <div class="name">${o.user || "User "+o.user_id} · <span class="mono">${o.course_id}</span></div>
-        <div class="sub">Order <span class="mono">${o.order_id}</span> · ${o.created_at}</div>
-      </div>
-      <div style="text-align:right">
-        <div class="amt mono">₹${o.amount}</div>
-        ${right}
-      </div>
-    </div>`;
-  }).join("");
-}
-
-function renderSms(data){
-  if(!data.length){ document.getElementById("list").innerHTML = '<div class="empty">SMS pool khaali hai.</div>'; return; }
-  document.getElementById("list").innerHTML = data.map(s => `
-    <div class="item pending">
-      <div class="main">
-        <div class="name">₹<span class="mono">${s.amount}</span></div>
-        <div class="sub mono">${s.preview}</div>
-      </div>
-      <div style="text-align:right">
-        <div class="sub">${s.created_at}</div>
-        <div class="timer mono" data-remaining="${s.remaining_seconds}">${fmtSecs(s.remaining_seconds)} me delete</div>
-      </div>
-    </div>`).join("");
-}
-
-function renderUsers(data){
-  if(!data.length){ document.getElementById("list").innerHTML = '<div class="empty">Koi user nahi mila.</div>'; return; }
-  document.getElementById("list").innerHTML = data.map(u => `
-    <div class="item ok">
-      <div class="main">
-        <div class="name">User ID: <span class="mono">${u.user_id}</span></div>
-        <div class="sub">Last active: ${u.updated_at || "—"}${u.active_offer ? " · Offer: "+u.active_offer : ""}</div>
-      </div>
-    </div>`).join("");
-}
-
-async function loadList(){
-  if(currentTab === "orders"){
-    const r = await fetch("/dashboard/api/orders?status="+currentStatus);
-    liveData = await r.json();
-    renderOrders(liveData);
-  } else if(currentTab === "sms"){
-    const r = await fetch("/dashboard/api/sms-pool");
-    liveData = await r.json();
-    renderSms(liveData);
+  if(curTab==="orders"){
+    r=await fetch("/dashboard/api/orders?status="+curSt); let o=await r.json();
+    document.getElementById("list").innerHTML = o.map(x=>{
+      let c=x.status==="PENDING"?"pending":x.status==="EXPIRED"?"expired":"ok";
+      let rgt = x.status==="PENDING"?`<div class="timer mono" data-remain="${x.remaining_seconds}">${fmtSecs(x.remaining_seconds)} bacha</div>`:`<div class="sub">${x.method||x.status}</div>`;
+      if((x.status==="PENDING"||x.status==="EXPIRED") && x.has_screenshot) rgt+=`<button class="action-btn ok-btn" onclick="appr('${x.order_id}')">📸 Approve (SS)</button>`;
+      return `<div class="item ${c}"><div class="main"><div class="name">${x.user} · <span class="mono">${x.course_id}</span></div><div class="sub">${x.order_id} · ${x.created_at}</div></div><div style="text-align:right"><div class="amt mono">₹${x.amount}</div>${rgt}</div></div>`;
+    }).join("")||"No orders.";
+  } else if(curTab==="courses"){
+    r=await fetch("/dashboard/api/courses"); let o=await r.json();
+    document.getElementById("list").innerHTML = o.map(x=>`<div class="item ok"><div class="main"><div class="name"><span class="mono">${x.course_id}</span> ${x.is_channel?'📢 Channel':'📝 Text'}</div><div class="sub">₹${x.amount} · ${x.caption}</div></div><div><button class="action-btn danger-btn" onclick="delC('${x.course_id}')">🗑 Delete</button></div></div>`).join("")||"No courses.";
+  } else if(curTab==="sms"){
+    r=await fetch("/dashboard/api/sms-pool"); let o=await r.json();
+    document.getElementById("list").innerHTML = o.map(x=>`<div class="item pending"><div class="main"><div class="name">₹${x.amount}</div><div class="sub mono">${x.preview}</div></div><div><div class="sub">${x.created_at}</div></div></div>`).join("")||"No SMS.";
   } else {
-    const r = await fetch("/dashboard/api/users");
-    liveData = await r.json();
-    renderUsers(liveData);
+    r=await fetch("/dashboard/api/users"); let o=await r.json();
+    document.getElementById("list").innerHTML = o.map(x=>`<div class="item ok"><div class="main"><div class="name">ID: <span class="mono">${x.user_id}</span></div><div class="sub">Active: ${x.updated_at}</div></div></div>`).join("")||"No users.";
   }
 }
-
-document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () => {
-  document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
-  t.classList.add("active");
-  currentTab = t.dataset.tab;
-  document.getElementById("subtabs").style.display = currentTab === "orders" ? "flex" : "none";
-  loadList();
-}));
-document.querySelectorAll(".subtab").forEach(t => t.addEventListener("click", () => {
-  document.querySelectorAll(".subtab").forEach(x => x.classList.remove("active"));
-  t.classList.add("active");
-  currentStatus = t.dataset.status;
-  loadList();
-}));
-
-function tickTimers(){
-  document.querySelectorAll("[data-remaining]").forEach(el => {
-    let s = parseInt(el.dataset.remaining) - 1;
-    if(s < 0) s = 0;
-    el.dataset.remaining = s;
-    el.textContent = (el.textContent.includes("delete") ? fmtSecs(s)+" me delete" : fmtSecs(s)+" bacha");
-  });
-  document.getElementById("clock").textContent = new Date().toLocaleTimeString("en-IN", {hour12:true});
-}
-
-loadOverview(); loadList();
-setInterval(loadOverview, 15000);
-setInterval(loadList, 15000);
-setInterval(tickTimers, 1000);
-</script>
-</body>
-</html>"""
+async function appr(id){ if(confirm("Approve order manually?")){ await fetch("/dashboard/api/orders/"+id+"/approve",{method:"POST"}); load(); } }
+async function delC(id){ if(confirm("Delete course?")){ await fetch("/dashboard/api/courses/"+id,{method:"DELETE"}); load(); } }
+document.querySelectorAll(".tab").forEach(t=>t.addEventListener("click",()=>{ document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active")); t.classList.add("active"); curTab=t.dataset.tab; document.getElementById("subtabs").style.display=curTab==="orders"?"flex":"none"; load(); }));
+document.querySelectorAll(".subtab").forEach(t=>t.addEventListener("click",()=>{ document.querySelectorAll(".subtab").forEach(x=>x.classList.remove("active")); t.classList.add("active"); curSt=t.dataset.status; load(); }));
+setInterval(()=>{ document.querySelectorAll("[data-remain]").forEach(el=>{ let s=Math.max(0,el.dataset.remain-1); el.dataset.remain=s; el.textContent=fmtSecs(s)+" bacha"; }); document.getElementById("clock").textContent=new Date().toLocaleTimeString("en-IN"); }, 1000);
+load(); setInterval(load, 15000);
+</script></body></html>"""
 
 @app.route("/dashboard")
 @require_auth
-def dashboard_page():
-    return DASHBOARD_HTML
+def dashboard_page(): return DASHBOARD_HTML
 
-# ==========================================
-# 🔁 RESTART RECOVERY — server restart/sleep के बाद pending orders वापस लोड करें
-# ==========================================
 def restore_pending_orders():
-    restored, expired_now = 0, 0
     for order in orders_col.find({"status": "PENDING"}):
-        order_id = order["order_id"]
-        amt_key = order.get("amount")
-        chat_id = order.get("chat_id")
-        created_ts = order.get("created_at", 0)
-        elapsed = time.time() - created_ts if created_ts else QR_EXPIRY_SECONDS
-        remaining = QR_EXPIRY_SECONDS - elapsed
-
-        with pending_lock:
-            pending_orders[amt_key] = order
-            all_orders_cache[order_id] = order
-
-        qr_msg_id = order.get("qr_msg_id")
-
+        order_id, amt_key, chat_id, created_ts = order["order_id"], order.get("amount"), order.get("chat_id"), order.get("created_at", 0)
+        remaining = QR_EXPIRY_SECONDS - (time.time() - created_ts if created_ts else QR_EXPIRY_SECONDS)
+        with pending_lock: pending_orders[amt_key], all_orders_cache[order_id] = order, order
         if remaining > 0:
-            # अभी भी valid है -> बचे हुए समय के लिए timer + checker फिर से शुरू करें
-            threading.Timer(remaining, expire_qr, args=(chat_id, qr_msg_id, order["course_id"], amt_key, order_id)).start()
+            threading.Timer(remaining, expire_qr, args=(chat_id, order.get("qr_msg_id"), order["course_id"], amt_key, order_id)).start()
             threading.Thread(target=background_order_checker, args=(order_id, amt_key, int(remaining)), daemon=True).start()
-            restored += 1
         else:
-            # समय पहले ही निकल चुका है (लंबे समय तक server down रहा था) -> तुरंत expire करके screenshot माँग लें
-            threading.Thread(target=expire_qr, args=(chat_id, qr_msg_id, order["course_id"], amt_key, order_id), daemon=True).start()
-            expired_now += 1
-
-    if restored or expired_now:
-        print(f"🔁 Restart Recovery: {restored} orders resumed, {expired_now} orders expired immediately.")
-
+            threading.Thread(target=expire_qr, args=(chat_id, order.get("qr_msg_id"), order["course_id"], amt_key, order_id), daemon=True).start()
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
     restore_pending_orders()
     threading.Thread(target=lambda: bot.infinity_polling(skip_pending=True), daemon=True).start()
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
