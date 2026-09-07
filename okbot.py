@@ -84,6 +84,8 @@ try:
     try:
         sms_pool_col.create_index("created_at_dt", expireAfterSeconds=SMS_POOL_TTL_HOURS * 3600)
         orders_col.create_index("created_at_dt", expireAfterSeconds=ORDER_TTL_HOURS * 3600)
+        orders_col.create_index([("user_id", 1), ("offer_id", 1), ("status", 1)])
+        orders_col.create_index([("course_id", 1), ("status", 1)])
     except Exception:
         pass
     print(f"✅ MongoDB Connected! (Database: {MONGO_DB_NAME})")
@@ -180,6 +182,37 @@ def generate_unique_amount(base_amount):
             if candidate not in pending_orders: return candidate
         return f"{base_clean + (random.randint(1, 99) / 100):.2f}"
 
+# ==========================================
+# 🎟 OFFER VALIDATION (per-user + global limit)
+# ==========================================
+def get_offer_usage_count(user_id, offer_code):
+    """Yeh user is offer_code se ab tak kitni baar (COMPLETED) purchase kar chuka hai."""
+    return orders_col.count_documents({
+        "user_id": user_id,
+        "offer_id": offer_code,
+        "status": {"$in": ["COMPLETED_AUTO", "COMPLETED_MANUAL"]}
+    })
+
+def check_offer_validity(offer, user_id, course_id=None):
+    """Offer expiry, global max_users, per-user limit, aur target course - sab ek jagah check karta hai."""
+    if not offer:
+        return False, "not_found"
+    now_ts = time.time()
+    if offer.get("expires_at_ts") and now_ts > offer["expires_at_ts"]:
+        return False, "expired"
+    if offer.get("max_users", -1) != -1 and offer.get("used_count", 0) >= offer["max_users"]:
+        return False, "max_reached"
+    per_user_limit = offer.get("per_user_limit", 1)  # ⚠️ default 1 = ek user sirf ek baar claim/use kar sakta hai
+    if per_user_limit != -1 and get_offer_usage_count(user_id, offer["offer_code"]) >= per_user_limit:
+        return False, "already_used"
+    if course_id and offer.get("target_type") == "single" and offer.get("target_course_id") != course_id:
+        return False, "wrong_course"
+    return True, "ok"
+
+def clear_user_offer(user_id, offer_code):
+    """User ke profile se yeh (ya koi bhi) active offer hata do — dono naya (active_offer_code) aur purana (active_offer) field."""
+    users_col.update_one({"user_id": user_id}, {"$unset": {"active_offer_code": "", "active_offer": ""}})
+
 def update_channel_order_status(order, status_type, extra_text=""):
     channel_msg_id = order.get("channel_msg_id")
     if not channel_msg_id: return
@@ -251,7 +284,14 @@ def deliver_course_to_buyer(order, sms_text=None, is_manual=False):
     date_now = get_ist_time()
     verify_type = "MANUAL-APPROVED" if is_manual else "AUTO-VERIFIED"
     purchases_col.insert_one({"user_id": user_id, "username": order.get("user_mention", f"User ({user_id})"), "item_info": f"{course_id} | Rate: ₹{order['amount']} | {verify_type} (order {order_id})", "date": date_now})
-    if order.get("offer_id"): offers_col.update_one({"offer_code": order["offer_id"]}, {"$inc": {"used_count": 1}})
+    if order.get("offer_id"):
+        offers_col.update_one({"offer_code": order["offer_id"]}, {"$inc": {"used_count": 1}})
+        fresh_offer = offers_col.find_one({"offer_code": order["offer_id"]})
+        per_user_limit = (fresh_offer or {}).get("per_user_limit", 1)
+        # ✅ Bug fix: purchase complete hote hi, agar user apni per-user limit tak pahunch gaya hai,
+        # to us offer ko uske profile se hata do — taaki wahi offer link dobara kisi aur course par kaam na kare.
+        if per_user_limit != -1 and get_offer_usage_count(user_id, order["offer_id"]) >= per_user_limit:
+            clear_user_offer(user_id, order["offer_id"])
     update_channel_order_status(order, "MANUAL_APPROVED" if is_manual else "AUTO_VERIFIED", extra_text=sms_text or "")
 
     manual_msg_id = order.get("manual_msg_id")
@@ -436,7 +476,11 @@ def start_command(message):
         if offer.get("max_users", -1) != -1 and offer.get("used_count", 0) >= offer["max_users"]:
             bot.send_message(user_id, "⚠️ <b>This offer has reached its maximum claim limit!</b>", parse_mode="HTML")
             return send_custom_start_menu(user_id)
-        users_col.update_one({"user_id": user_id}, {"$set": {"active_offer": offer}}, upsert=True)
+        per_user_limit = offer.get("per_user_limit", 1)
+        if per_user_limit != -1 and get_offer_usage_count(user_id, offer["offer_code"]) >= per_user_limit:
+            bot.send_message(user_id, "⚠️ <b>Aapne yeh offer pehle claim karke istemal kar liya hai.</b>\nYeh offer dobara claim nahi ho sakta.", parse_mode="HTML")
+            return send_custom_start_menu(user_id)
+        users_col.update_one({"user_id": user_id}, {"$set": {"active_offer_code": offer["offer_code"]}, "$unset": {"active_offer": ""}}, upsert=True)
         bot.send_message(user_id, f"🎉 <b>Congrats! {offer['discount_percent']}% discount activated!</b>", parse_mode="HTML")
         if offer["target_type"] == "single":
             c = courses_col.find_one({"course_id": offer["target_course_id"]})
@@ -550,7 +594,14 @@ def handle_all_messages(message):
         elif step == "OFFER_LIMIT":
             try:
                 lim = int(re.sub(r"[^\d]", "", message.text.strip()))
-                admin_data[ADMIN_ID]["max_users"], admin_data[ADMIN_ID]["step"] = -1 if lim == 0 else lim, "OFFER_HOURS"
+                admin_data[ADMIN_ID]["max_users"], admin_data[ADMIN_ID]["step"] = -1 if lim == 0 else lim, "OFFER_PERUSER"
+                bot.send_message(ADMIN_ID, "🔁 <b>Ek user kitni baar yeh offer claim/use kar sakta hai?</b>\n(<b>1</b> = sirf ek baar hi — recommended, taaki koi doosre course par offer reuse na kar sake. <b>0</b> = unlimited baar):", parse_mode="HTML")
+            except Exception: bot.send_message(ADMIN_ID, "❌ Invalid number.")
+            return
+        elif step == "OFFER_PERUSER":
+            try:
+                pl = int(re.sub(r"[^\d]", "", message.text.strip()))
+                admin_data[ADMIN_ID]["per_user_limit"], admin_data[ADMIN_ID]["step"] = -1 if pl == 0 else pl, "OFFER_HOURS"
                 bot.send_message(ADMIN_ID, "⏳ <b>Active for how many hours?</b> (e.g. 24 or 48):", parse_mode="HTML")
             except Exception: bot.send_message(ADMIN_ID, "❌ Invalid number.")
             return
@@ -561,7 +612,7 @@ def handle_all_messages(message):
                 doc = {
                     "offer_code": off_code, "discount_percent": admin_data[ADMIN_ID]["discount"],
                     "target_type": admin_data[ADMIN_ID]["target_type"], "target_course_id": admin_data[ADMIN_ID].get("target_course_id"),
-                    "max_users": admin_data[ADMIN_ID]["max_users"], "used_count": 0, "created_at_ts": now_ts,
+                    "max_users": admin_data[ADMIN_ID]["max_users"], "per_user_limit": admin_data[ADMIN_ID].get("per_user_limit", 1), "used_count": 0, "created_at_ts": now_ts,
                     "expires_at_ts": now_ts + (hrs * 3600), "expires_str": (datetime.now(IST) + timedelta(hours=hrs)).strftime("%d-%m-%Y %I:%M %p")
                 }
                 offers_col.insert_one(doc)
@@ -839,16 +890,18 @@ def handle_buttons(call):
                     try: bot.delete_message(chat_id, user_qr_messages.pop(chat_id))
                     except Exception: pass
             base_price = float(course["amount"])
-            active_off = (users_col.find_one({"user_id": call.from_user.id}) or {}).get("active_offer")
+            u_rec = users_col.find_one({"user_id": call.from_user.id}) or {}
+            active_off_code = u_rec.get("active_offer_code") or (u_rec.get("active_offer") or {}).get("offer_code")
             disc_pct, off_code, final_base = None, None, base_price
-            if active_off:
-                now_ts = time.time()
-                valid_e = not (active_off.get("expires_at_ts") and now_ts > active_off["expires_at_ts"])
-                valid_l = not (active_off.get("max_users", -1) != -1 and active_off.get("used_count", 0) >= active_off["max_users"])
-                valid_t = active_off.get("target_type") == "all" or active_off.get("target_course_id") == course_id
-                if valid_e and valid_l and valid_t:
-                    disc_pct, off_code = active_off["discount_percent"], active_off["offer_code"]
+            if active_off_code:
+                live_offer = offers_col.find_one({"offer_code": active_off_code})
+                is_valid, _reason = check_offer_validity(live_offer, call.from_user.id, course_id)
+                if is_valid:
+                    disc_pct, off_code = live_offer["discount_percent"], live_offer["offer_code"]
                     final_base = round(base_price * (1.0 - (disc_pct / 100.0)), 2)
+                else:
+                    # ✅ Offer expired/used-up/invalid ho chuka hai — profile se hata do taaki baar baar check na ho
+                    clear_user_offer(call.from_user.id, active_off_code)
             order_id, amt_key = str(uuid.uuid4())[:8], generate_unique_amount(final_base)
             u_men = f"<a href='tg://user?id={call.from_user.id}'>{call.from_user.first_name}</a> (@{call.from_user.username or ''})"
             o_data = {
@@ -1085,6 +1138,26 @@ def api_delete_course(course_id):
     settings_col.update_one({"_id": "store_plans"}, {"$pull": {"course_ids": course_id}})
     return jsonify({"status": "success"})
 
+@app.route("/dashboard/api/courses/<course_id>/buyers")
+@require_auth
+def api_course_buyers(course_id):
+    course = courses_col.find_one({"course_id": course_id})
+    is_channel = bool(course and course.get("channel_id"))
+    completed_q = {"course_id": course_id, "status": {"$in": ["COMPLETED_AUTO", "COMPLETED_MANUAL"]}}
+    out = []
+    for o in orders_col.find(completed_q).sort("delivered_at_ts", -1):
+        uid = o.get("user_id")
+        joined = None
+        if is_channel:
+            joined = channel_logs_col.count_documents({"user_id": uid, "course_id": course_id, "status": "APPROVED"}) > 0
+        out.append({
+            "user_id": uid, "user": _strip_html(o.get("user_mention", f"User ({uid})")),
+            "amount": o.get("amount"), "purchased_at": o.get("delivered_at") or o.get("created_at_str"),
+            "method": {"COMPLETED_AUTO": "Auto SMS", "COMPLETED_MANUAL": "Manual"}.get(o.get("status")),
+            "channel_joined": joined
+        })
+    return jsonify({"course_id": course_id, "is_channel": is_channel, "channel_name": (course or {}).get("channel_name"), "buyers": out})
+
 @app.route("/dashboard/api/offers", methods=["GET", "POST"])
 @require_auth
 def api_offers():
@@ -1096,7 +1169,7 @@ def api_offers():
         doc = {
             "offer_code": off_code, "discount_percent": int(d.get("discount", 10)),
             "target_type": d.get("target_type", "all"), "target_course_id": d.get("course_id", ""),
-            "max_users": int(d.get("max_users", -1)), "used_count": 0,
+            "max_users": int(d.get("max_users", -1)), "per_user_limit": int(d.get("per_user_limit", 1)), "used_count": 0,
             "created_at_ts": now_ts, "expires_at_ts": now_ts + (hrs * 3600),
             "expires_str": (datetime.now(IST) + timedelta(hours=hrs)).strftime("%d-%m-%Y %I:%M %p")
         }
@@ -1108,7 +1181,7 @@ def api_offers():
     for o in offers_col.find().sort("created_at_ts", -1):
         status = "Active" if o["expires_at_ts"] > now and (o["max_users"] == -1 or o["used_count"] < o["max_users"]) else "Expired"
         link = f"https://t.me/{BOT_USERNAME}?start={o['offer_code']}"
-        out.append({"offer_code": o["offer_code"], "discount": o["discount_percent"], "target": o["target_type"], "course": o["target_course_id"], "used": o["used_count"], "max": o["max_users"], "expires": o["expires_str"], "status": status, "link": link})
+        out.append({"offer_code": o["offer_code"], "discount": o["discount_percent"], "target": o["target_type"], "course": o["target_course_id"], "used": o["used_count"], "max": o["max_users"], "per_user": o.get("per_user_limit", 1), "expires": o["expires_str"], "status": status, "link": link})
     return jsonify(out)
 
 @app.route("/dashboard/api/offers/<offer_code>", methods=["DELETE"])
@@ -1227,7 +1300,7 @@ async function load(){
     }).join("")||"No orders.";
   } else if(curTab==="courses"){
     r=await fetch("/dashboard/api/courses"); let o=await r.json();
-    document.getElementById("list").innerHTML = o.map(x=>`<div class="item ok"><div class="main"><div class="name"><span class="mono">${x.course_id}</span> ${x.is_channel?'📢 Channel':'📝 Text'}</div><div class="sub">₹${x.amount} · ${x.caption}</div></div><div><button class="action-btn danger-btn" onclick="delC('${x.course_id}')">🗑 Delete</button></div></div>`).join("")||"No courses.";
+    document.getElementById("list").innerHTML = o.map(x=>`<div class="item ok" style="cursor:pointer" onclick="viewBuyers('${x.course_id}')"><div class="main"><div class="name"><span class="mono">${x.course_id}</span> ${x.is_channel?'📢 Channel':'📝 Text'}</div><div class="sub">₹${x.amount} · ${x.caption}</div></div><div><button class="action-btn danger-btn" onclick="event.stopPropagation(); delC('${x.course_id}')">🗑 Delete</button></div></div>`).join("")||"No courses.";
   } else if(curTab==="offers"){
     r=await fetch("/dashboard/api/offers"); let o=await r.json();
     let formHTML = `<div class="form-box"><h3>Create New Offer</h3>
@@ -1235,9 +1308,10 @@ async function load(){
       <label>Target:</label><select id="off_tgt" onchange="document.getElementById('off_cid').style.display=this.value=='single'?'block':'none'"><option value="all">All Courses</option><option value="single">Single Course</option></select>
       <input type="text" id="off_cid" placeholder="Course ID (e.g. c_12345)" style="display:none">
       <label>Max Users (0 for unlimited):</label><input type="number" id="off_max" value="0">
+      <label>Per User Limit (1 = one-time only per user, 0 = unlimited):</label><input type="number" id="off_peruser" value="1">
       <label>Active Hours:</label><input type="number" id="off_hrs" value="24">
       <button onclick="createOffer()">Create Offer</button></div>`;
-    let listHTML = o.map(x=>`<div class="item ${x.status==='Active'?'ok':'expired'}"><div class="main"><div class="name">${x.discount}% OFF - <span class="mono">${x.offer_code}</span></div><div class="sub">🔗 Link: <a href="${x.link}" target="_blank" style="color:#3ED9A0">${x.link}</a></div><div class="sub">Target: ${x.target} ${x.course?'('+x.course+')':''} | Used: ${x.used}/${x.max==-1?'∞':x.max} | Exp: ${x.expires}</div></div><div><button class="action-btn danger-btn" onclick="delOffer('${x.offer_code}')">🗑</button></div></div>`).join("");
+    let listHTML = o.map(x=>`<div class="item ${x.status==='Active'?'ok':'expired'}"><div class="main"><div class="name">${x.discount}% OFF - <span class="mono">${x.offer_code}</span></div><div class="sub">🔗 Link: <a href="${x.link}" target="_blank" style="color:#3ED9A0">${x.link}</a></div><div class="sub">Target: ${x.target} ${x.course?'('+x.course+')':''} | Used: ${x.used}/${x.max==-1?'∞':x.max} | Per User: ${x.per_user==-1?'∞':x.per_user+'x'} | Exp: ${x.expires}</div></div><div><button class="action-btn danger-btn" onclick="delOffer('${x.offer_code}')">🗑</button></div></div>`).join("");
     document.getElementById("list").innerHTML = formHTML + (listHTML||"No offers.");
   } else if(curTab==="broadcast"){
     document.getElementById("list").innerHTML = `<div class="form-box"><h3>Broadcast Message</h3>
@@ -1259,9 +1333,15 @@ async function load(){
 }
 async function appr(id){ if(confirm("Approve order manually?")){ await fetch("/dashboard/api/orders/"+id+"/approve",{method:"POST"}); load(); } }
 async function delC(id){ if(confirm("Delete course?")){ await fetch("/dashboard/api/courses/"+id,{method:"DELETE"}); load(); } }
+async function viewBuyers(courseId){
+  document.getElementById("list").innerHTML = "Loading buyers...";
+  let r = await fetch("/dashboard/api/courses/"+courseId+"/buyers"); let d = await r.json();
+  let rows = d.buyers.map(b=>`<div class="item ok"><div class="main"><div class="name">${b.user} <span class="mono">(${b.user_id})</span></div><div class="sub">🕒 ${b.purchased_at} · 💰 ₹${b.amount} · ${b.method}</div></div>${d.is_channel?`<div style="font-weight:bold; color:var(--${b.channel_joined?'ok':'danger'})">${b.channel_joined?'📺 Joined':'⏳ Not Joined'}</div>`:''}</div>`).join("")||"Is pack ko abhi tak kisi ne nahi khareeda.";
+  document.getElementById("list").innerHTML = `<div class="form-box"><button class="action-btn" onclick="curTab='courses'; document.getElementById('subtabs').style.display='none'; load();">⬅ Back to Courses</button><h3 style="margin-top:10px; margin-bottom:0">${courseId}${d.channel_name?' · 📺 '+d.channel_name:''}</h3><div class="sub" style="color:var(--muted)">${d.buyers.length} Buyer(s)</div></div>` + rows;
+}
 async function delOffer(id){ if(confirm("Delete this offer?")){ await fetch("/dashboard/api/offers/"+id,{method:"DELETE"}); load(); } }
 async function createOffer(){
-  let d = { discount: document.getElementById('off_disc').value, target_type: document.getElementById('off_tgt').value, course_id: document.getElementById('off_cid').value, max_users: document.getElementById('off_max').value==-1?-1:(document.getElementById('off_max').value==0?-1:document.getElementById('off_max').value), hours: document.getElementById('off_hrs').value };
+  let d = { discount: document.getElementById('off_disc').value, target_type: document.getElementById('off_tgt').value, course_id: document.getElementById('off_cid').value, max_users: document.getElementById('off_max').value==-1?-1:(document.getElementById('off_max').value==0?-1:document.getElementById('off_max').value), per_user_limit: document.getElementById('off_peruser').value==0?-1:document.getElementById('off_peruser').value, hours: document.getElementById('off_hrs').value };
   await fetch("/dashboard/api/offers", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(d)}); load();
 }
 async function sendBc(){
