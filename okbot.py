@@ -132,9 +132,26 @@ def tracked_send_message(chat_id, *args, **kwargs):
     register_activity(chat_id, msg.message_id)
     return msg
 bot.send_message = tracked_send_message
-bot.send_photo = lambda cid, *a, **kw: register_activity(cid, orig_send_photo(cid, *a, **kw).message_id) or orig_send_photo(cid, *a, **kw)
-bot.send_video = lambda cid, *a, **kw: register_activity(cid, orig_send_video(cid, *a, **kw).message_id) or orig_send_video(cid, *a, **kw)
-bot.send_document = lambda cid, *a, **kw: register_activity(cid, orig_send_document(cid, *a, **kw).message_id) or orig_send_document(cid, *a, **kw)
+
+def tracked_send_photo(chat_id, *args, **kwargs):
+    msg = orig_send_photo(chat_id, *args, **kwargs)
+    register_activity(chat_id, msg.message_id)
+    return msg
+bot.send_photo = tracked_send_photo
+
+def tracked_send_video(chat_id, *args, **kwargs):
+    msg = orig_send_video(chat_id, *args, **kwargs)
+    register_activity(chat_id, msg.message_id)
+    return msg
+bot.send_video = tracked_send_video
+
+def tracked_send_document(chat_id, *args, **kwargs):
+    msg = orig_send_document(chat_id, *args, **kwargs)
+    register_activity(chat_id, msg.message_id)
+    return msg
+bot.send_document = tracked_send_document
+
+bot.send_media_group = orig_send_media_group
 
 def generate_upi_qr(amount, order_id):
     clean_amt = re.sub(r"[^\d.]", "", str(amount))
@@ -168,8 +185,36 @@ def generate_upi_qr(amount, order_id):
     bio.seek(0)
     return bio, clean_amt
 
+# ==========================================
+# 🛡️ RATE LIMITER & STATE MANAGEMENT (Crash Proof)
+# ==========================================
 admin_data, user_states, user_qr_messages, pending_orders, all_orders_cache = {}, {}, {}, {}, {}
+user_cooldowns = {}
 pending_lock = threading.Lock()
+
+def check_rate_limit(user_id, cooldown=2):
+    now = time.time()
+    if user_id in user_cooldowns and now - user_cooldowns[user_id] < cooldown:
+        return False
+    user_cooldowns[user_id] = now
+    return True
+
+def set_user_state(user_id, step, order_id=None, amount_key=None):
+    user_states[user_id] = {"step": step, "order_id": order_id, "amount_key": amount_key}
+    users_col.update_one({"user_id": user_id}, {"$set": {"bot_state": step, "bot_state_order": order_id, "bot_state_amt": amount_key}}, upsert=True)
+
+def get_user_state(user_id):
+    if user_id in user_states: return user_states[user_id]
+    u = users_col.find_one({"user_id": user_id})
+    if u and u.get("bot_state"):
+        st = {"step": u.get("bot_state"), "order_id": u.get("bot_state_order"), "amount_key": u.get("bot_state_amt")}
+        user_states[user_id] = st
+        return st
+    return {}
+
+def clear_user_state(user_id):
+    user_states.pop(user_id, None)
+    users_col.update_one({"user_id": user_id}, {"$unset": {"bot_state": "", "bot_state_order": "", "bot_state_amt": ""}})
 
 def generate_unique_amount(base_amount):
     base_clean = round(float(base_amount))
@@ -183,10 +228,9 @@ def generate_unique_amount(base_amount):
         return f"{base_clean + (random.randint(1, 99) / 100):.2f}"
 
 # ==========================================
-# 🎟 OFFER VALIDATION (per-user + global limit)
+# 🎟 OFFER VALIDATION
 # ==========================================
 def get_offer_usage_count(user_id, offer_code):
-    """Yeh user is offer_code se ab tak kitni baar (COMPLETED) purchase kar chuka hai."""
     return orders_col.count_documents({
         "user_id": user_id,
         "offer_id": offer_code,
@@ -194,23 +238,16 @@ def get_offer_usage_count(user_id, offer_code):
     })
 
 def check_offer_validity(offer, user_id, course_id=None):
-    """Offer expiry, global max_users, per-user limit, aur target course - sab ek jagah check karta hai."""
-    if not offer:
-        return False, "not_found"
+    if not offer: return False, "not_found"
     now_ts = time.time()
-    if offer.get("expires_at_ts") and now_ts > offer["expires_at_ts"]:
-        return False, "expired"
-    if offer.get("max_users", -1) != -1 and offer.get("used_count", 0) >= offer["max_users"]:
-        return False, "max_reached"
-    per_user_limit = offer.get("per_user_limit", 1)  # ⚠️ default 1 = ek user sirf ek baar claim/use kar sakta hai
-    if per_user_limit != -1 and get_offer_usage_count(user_id, offer["offer_code"]) >= per_user_limit:
-        return False, "already_used"
-    if course_id and offer.get("target_type") == "single" and offer.get("target_course_id") != course_id:
-        return False, "wrong_course"
+    if offer.get("expires_at_ts") and now_ts > offer["expires_at_ts"]: return False, "expired"
+    if offer.get("max_users", -1) != -1 and offer.get("used_count", 0) >= offer["max_users"]: return False, "max_reached"
+    per_user_limit = offer.get("per_user_limit", 1) 
+    if per_user_limit != -1 and get_offer_usage_count(user_id, offer["offer_code"]) >= per_user_limit: return False, "already_used"
+    if course_id and offer.get("target_type") == "single" and offer.get("target_course_id") != course_id: return False, "wrong_course"
     return True, "ok"
 
 def clear_user_offer(user_id, offer_code):
-    """User ke profile se yeh (ya koi bhi) active offer hata do — dono naya (active_offer_code) aur purana (active_offer) field."""
     users_col.update_one({"user_id": user_id}, {"$unset": {"active_offer_code": "", "active_offer": ""}})
 
 def update_channel_order_status(order, status_type, extra_text=""):
@@ -233,6 +270,15 @@ def update_channel_order_status(order, status_type, extra_text=""):
     try: bot.edit_message_text(new_text, chat_id=DB_CHANNEL_ID, message_id=channel_msg_id, parse_mode="HTML")
     except Exception: pass
 
+def screenshot_timeout(chat_id, order_id, prompt_msg_id):
+    state = get_user_state(chat_id)
+    if state and state.get("step") == "WAITING_PAYMENT_SS" and state.get("order_id") == order_id:
+        clear_user_state(chat_id) 
+        try:
+            bot.edit_message_text("⏳ <b>समय समाप्त!</b>\nआपने 10 मिनट के अंदर स्क्रीनशॉट नहीं भेजा।\nयह वेरिफिकेशन रद्द कर दिया गया है, कृपया कोर्स पर दोबारा क्लिक करें।", chat_id=chat_id, message_id=prompt_msg_id, parse_mode="HTML")
+        except Exception:
+            pass
+
 def expire_qr(chat_id, message_id, course_id, amount_key, order_id):
     order = all_orders_cache.get(order_id) or orders_col.find_one({"order_id": order_id})
     if not order: return
@@ -240,32 +286,46 @@ def expire_qr(chat_id, message_id, course_id, amount_key, order_id):
 
     sms_rec = sms_pool_col.find_one({"amount": amount_key, "status": "UNUSED"})
     if sms_rec:
-        sms_pool_col.update_one({"_id": sms_rec["_id"]}, {"$set": {"status": "PROCESSED"}})
-        deliver_course_to_buyer(order, sms_text=sms_rec.get("raw_text"), is_manual=False)
-        return
+        updated = sms_pool_col.update_one({"_id": sms_rec["_id"], "status": "UNUSED"}, {"$set": {"status": "PROCESSED"}})
+        if updated.modified_count > 0:
+            deliver_course_to_buyer(order, sms_text=sms_rec.get("raw_text"), is_manual=False)
+            return
+
+    # Atomic Update for Expiry to prevent Race Conditions
+    res = orders_col.update_one({"order_id": order_id, "status": "PENDING"}, {"$set": {"status": "EXPIRED"}})
+    if res.modified_count == 0:
+        return 
 
     order["status"] = "EXPIRED"
-    orders_col.update_one({"order_id": order_id}, {"$set": {"status": "EXPIRED"}})
     update_channel_order_status(order, "EXPIRED")
 
     with pending_lock: pending_orders.pop(amount_key, None)
     if chat_id in user_qr_messages and user_qr_messages[chat_id] == message_id: del user_qr_messages[chat_id]
+    
     try: bot.delete_message(chat_id, message_id)
     except Exception: pass
+    if order.get("qr_msg_id") and order.get("qr_msg_id") != message_id:
+        try: bot.delete_message(chat_id, order.get("qr_msg_id"))
+        except Exception: pass
 
     markup = InlineKeyboardMarkup().row(InlineKeyboardButton("✅ Verify Payment", callback_data=f"paydone_{order_id}"))
-    try: bot.send_message(chat_id, "⏳ <b>Time's up!</b>\n\nAgar aapne payment kar diya hai, to neeche <b>'✅ Verify Payment'</b> dabayein.", reply_markup=markup, parse_mode="HTML")
+    try: bot.send_message(chat_id, "⏳ <b>क्यूआर कोड का समय समाप्त!</b>\n\nअगर आपने पेमेंट कर दिया है, तो नीचे <b>'✅ Verify Payment'</b> दबाएं।", reply_markup=markup, parse_mode="HTML")
     except Exception: pass
 
 def deliver_course_to_buyer(order, sms_text=None, is_manual=False):
     order_id, chat_id, user_id, course_id = order["order_id"], order["chat_id"], order["user_id"], order["course_id"]
     course = courses_col.find_one({"course_id": course_id})
     new_status = "COMPLETED_MANUAL" if is_manual else "COMPLETED_AUTO"
-    order["status"] = new_status
-    orders_col.update_one({"order_id": order_id}, {"$set": {"status": new_status, "delivered_at": get_ist_time(), "delivered_at_ts": time.time()}})
+    
+    # Atomic Lock
+    res = orders_col.update_one({"order_id": order_id, "status": {"$in": ["PENDING", "EXPIRED"]}}, {"$set": {"status": new_status, "delivered_at": get_ist_time(), "delivered_at_ts": time.time()}})
+    if res.modified_count == 0: return # Prevents double delivery
 
+    order["status"] = new_status
     with pending_lock: pending_orders.pop(order.get("amount"), None)
-    if user_id in user_states and user_states[user_id].get("order_id") == order_id: del user_states[user_id]
+    
+    state = get_user_state(user_id)
+    if state and state.get("order_id") == order_id: clear_user_state(user_id)
     
     qr_msg_id = user_qr_messages.get(chat_id) or order.get("qr_msg_id")
     if qr_msg_id:
@@ -288,8 +348,6 @@ def deliver_course_to_buyer(order, sms_text=None, is_manual=False):
         offers_col.update_one({"offer_code": order["offer_id"]}, {"$inc": {"used_count": 1}})
         fresh_offer = offers_col.find_one({"offer_code": order["offer_id"]})
         per_user_limit = (fresh_offer or {}).get("per_user_limit", 1)
-        # ✅ Bug fix: purchase complete hote hi, agar user apni per-user limit tak pahunch gaya hai,
-        # to us offer ko uske profile se hata do — taaki wahi offer link dobara kisi aur course par kaam na kare.
         if per_user_limit != -1 and get_offer_usage_count(user_id, order["offer_id"]) >= per_user_limit:
             clear_user_offer(user_id, order["offer_id"])
     update_channel_order_status(order, "MANUAL_APPROVED" if is_manual else "AUTO_VERIFIED", extra_text=sms_text or "")
@@ -300,19 +358,6 @@ def deliver_course_to_buyer(order, sms_text=None, is_manual=False):
             bot.edit_message_reply_markup(DB_CHANNEL_ID, manual_msg_id, reply_markup=None)
             orig_send_message(DB_CHANNEL_ID, f"✅ <b>ORDER {order_id} ऑटोमैटिक रूप से वेरिफाई और डिलीवर हो गया</b> (delayed SMS मिल गया)।", parse_mode="HTML")
         except Exception: pass
-
-def background_order_checker(order_id, amount_str, max_seconds=None):
-    total = max_seconds if max_seconds is not None else QR_EXPIRY_SECONDS
-    iterations = max(1, total // 20)
-    for _ in range(iterations):
-        time.sleep(20)
-        order = all_orders_cache.get(order_id)
-        if not order or order.get("status") != "PENDING": break
-        sms_rec = sms_pool_col.find_one({"amount": amount_str, "status": "UNUSED"})
-        if sms_rec:
-            sms_pool_col.update_one({"_id": sms_rec["_id"]}, {"$set": {"status": "PROCESSED"}})
-            deliver_course_to_buyer(order, sms_text=sms_rec.get("raw_text"), is_manual=False)
-            break
 
 # ==========================================
 # 🛑 GATEKEEPER: CHANNEL JOIN REQUEST HANDLER
@@ -460,6 +505,7 @@ def send_admin_panel(chat_id):
 @bot.message_handler(commands=["start"])
 def start_command(message):
     user_id = message.chat.id
+    if not check_rate_limit(user_id, 1): return
     register_activity(user_id, message.message_id)
     users_col.update_one({"user_id": user_id}, {"$set": {"user_id": user_id, "updated_at": get_ist_time()}}, upsert=True)
     param = message.text.split()[1].strip() if len(message.text.split()) > 1 else ""
@@ -528,17 +574,19 @@ def start_command(message):
 @bot.message_handler(content_types=["photo", "video", "document", "text"])
 def handle_all_messages(message):
     user_id = message.chat.id
+    if not check_rate_limit(user_id, 1): return
     register_activity(user_id, message.message_id)
 
-    if user_id in user_states and user_states[user_id].get("step") == "WAITING_PAYMENT_SS":
-        order_id = user_states[user_id].get("order_id")
+    state = get_user_state(user_id)
+    if state and state.get("step") == "WAITING_PAYMENT_SS":
+        order_id = state.get("order_id")
         order = all_orders_cache.get(order_id) or orders_col.find_one({"order_id": order_id})
         if not message.photo and not message.document:
             bot.send_message(user_id, "❌ <b>Please send your screenshot as a photo or document.</b>", parse_mode="HTML")
             return
         fid = message.photo[-1].file_id if message.photo else message.document.file_id
         bot.send_message(user_id, "⏳ <b>Verification pending...</b>\nYour screenshot has been sent to admin.", parse_mode="HTML")
-        del user_states[user_id]
+        clear_user_state(user_id)
         u_str = f"@{message.from_user.username}" if message.from_user.username else "No Username"
         u_men = f"<a href='tg://user?id={user_id}'>{message.from_user.first_name}</a> ({u_str})"
         
@@ -744,6 +792,8 @@ def handle_all_messages(message):
 @bot.callback_query_handler(func=lambda call: True)
 def handle_buttons(call):
     data, chat_id, msg_id = call.data, call.message.chat.id, call.message.message_id
+    if not check_rate_limit(chat_id, 1.5): 
+        return bot.answer_callback_query(call.id, "⚠️ थोड़ा धीमे! (Slow down)", show_alert=False)
     register_activity(chat_id)
 
     if data == "user_view_plans":
@@ -823,26 +873,35 @@ def handle_buttons(call):
         settings_col.delete_one({"_id": "start_menu"})
         bot.edit_message_text("✅ <b>Reset!</b>", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
         return send_admin_panel(chat_id)
+        
     if data.startswith("paydone_"):
         oid = data.replace("paydone_", "")
         order = all_orders_cache.get(oid) or orders_col.find_one({"order_id": oid})
         if not order: return bot.answer_callback_query(call.id, "❌ Order not found.", show_alert=True)
         if order.get("status") in ("COMPLETED_AUTO", "COMPLETED_MANUAL"): return bot.answer_callback_query(call.id, "✅ Already delivered.", show_alert=True)
+        
         bot.answer_callback_query(call.id, "⏳ Checking...", show_alert=False)
         amt_key = order.get("amount")
         sms_rec = sms_pool_col.find_one({"amount": amt_key, "status": "UNUSED"})
         if sms_rec:
-            sms_pool_col.update_one({"_id": sms_rec["_id"]}, {"$set": {"status": "PROCESSED"}})
-            deliver_course_to_buyer(order, sms_text=sms_rec.get("raw_text"), is_manual=False)
-            return
-        user_states[chat_id] = {"step": "WAITING_PAYMENT_SS", "order_id": oid}
-        markup = InlineKeyboardMarkup().row(InlineKeyboardButton("📸 Send Screenshot", callback_data=f"send_ss_{oid}"))
-        try: bot.send_message(chat_id, "❌ <b>Your payment hasn't been received yet.</b>\nPlease send screenshot to verify manually.", reply_markup=markup, parse_mode="HTML")
+            updated = sms_pool_col.update_one({"_id": sms_rec["_id"], "status": "UNUSED"}, {"$set": {"status": "PROCESSED"}})
+            if updated.modified_count > 0:
+                deliver_course_to_buyer(order, sms_text=sms_rec.get("raw_text"), is_manual=False)
+                return
+            
+        try: bot.delete_message(chat_id, msg_id)
+        except Exception: pass
+        
+        set_user_state(chat_id, "WAITING_PAYMENT_SS", oid)
+        try: 
+            prompt_msg = bot.send_message(chat_id, "📸 <b>अपना पेमेंट स्क्रीनशॉट यहाँ भेजें।</b>\n⏳ <i>(कृपया 10 मिनट के अंदर भेजें, अन्यथा यह फेल हो जाएगा)</i>", parse_mode="HTML")
+            threading.Timer(600, screenshot_timeout, args=(chat_id, oid, prompt_msg.message_id)).start()
         except Exception: pass
         return
+        
     if data.startswith("send_ss_"):
         bot.answer_callback_query(call.id)
-        user_states[chat_id] = {"step": "WAITING_PAYMENT_SS", "order_id": data.replace("send_ss_", "")}
+        set_user_state(chat_id, "WAITING_PAYMENT_SS", data.replace("send_ss_", ""))
         bot.send_message(chat_id, "📸 <b>Please send your payment screenshot.</b>", parse_mode="HTML")
         return
     if data.startswith("man_appr_"):
@@ -884,11 +943,13 @@ def handle_buttons(call):
         course_id = data.replace("pay_upi_", "")
         course = courses_col.find_one({"course_id": course_id})
         if course:
-            if chat_id in user_states:
-                with pending_lock: pending_orders.pop(user_states[chat_id].get("amount_key"), None)
+            state = get_user_state(chat_id)
+            if state and state.get("step") == "PENDING_UPI":
+                with pending_lock: pending_orders.pop(state.get("amount_key", ""), None)
                 if chat_id in user_qr_messages:
                     try: bot.delete_message(chat_id, user_qr_messages.pop(chat_id))
                     except Exception: pass
+            
             base_price = float(course["amount"])
             u_rec = users_col.find_one({"user_id": call.from_user.id}) or {}
             active_off_code = u_rec.get("active_offer_code") or (u_rec.get("active_offer") or {}).get("offer_code")
@@ -900,8 +961,8 @@ def handle_buttons(call):
                     disc_pct, off_code = live_offer["discount_percent"], live_offer["offer_code"]
                     final_base = round(base_price * (1.0 - (disc_pct / 100.0)), 2)
                 else:
-                    # ✅ Offer expired/used-up/invalid ho chuka hai — profile se hata do taaki baar baar check na ho
                     clear_user_offer(call.from_user.id, active_off_code)
+                    
             order_id, amt_key = str(uuid.uuid4())[:8], generate_unique_amount(final_base)
             u_men = f"<a href='tg://user?id={call.from_user.id}'>{call.from_user.first_name}</a> (@{call.from_user.username or ''})"
             o_data = {
@@ -911,7 +972,6 @@ def handle_buttons(call):
             }
             d_log = f"\n🎟 <b>Offer Applied:</b> {disc_pct}% OFF" if disc_pct else ""
             
-            # 📌 Adding Channel Name to Initial QR Pending Alert
             ch_name_display = f"\n📺 <b>Channel:</b> {course.get('channel_name')}" if course.get("channel_name") else f"\n📚 <b>Pack:</b> <code>{course_id}</code>"
             ch_txt = f"🟡 <b>[ORDER INITIATED - QR]</b>\n\n👤 <b>User:</b> {u_men}\n🔖 <b>Order:</b> <code>{order_id}</code>{ch_name_display}\n💰 <b>Amount:</b> ₹{amt_key}{d_log}\n⏳ <b>Status:</b> ⏳ पेंडिंग"
             
@@ -923,12 +983,14 @@ def handle_buttons(call):
             with pending_lock:
                 pending_orders[amt_key] = o_data
                 all_orders_cache[order_id] = o_data
-            user_states[chat_id] = {"course_id": course_id, "order_id": order_id, "amount_key": amt_key}
+                
+            set_user_state(chat_id, "PENDING_UPI", order_id, amt_key)
 
             sms_rec = sms_pool_col.find_one({"amount": amt_key, "status": "UNUSED"})
             if sms_rec:
-                sms_pool_col.update_one({"_id": sms_rec["_id"]}, {"$set": {"status": "PROCESSED"}})
-                return deliver_course_to_buyer(o_data, sms_text=sms_rec.get("raw_text"), is_manual=False)
+                updated = sms_pool_col.update_one({"_id": sms_rec["_id"], "status": "UNUSED"}, {"$set": {"status": "PROCESSED"}})
+                if updated.modified_count > 0:
+                    return deliver_course_to_buyer(o_data, sms_text=sms_rec.get("raw_text"), is_manual=False)
 
             qr_img_bio, clean_amt = generate_upi_qr(amt_key, order_id)
             inv = f"👤 <b>User:</b> {call.from_user.first_name}\n🆔 <b>Order:</b> <code>{order_id}</code>\n💰 <b>Amount:</b> ₹{clean_amt}\n⚠️ <b>Exact Amount Pay Karein.</b>\n⏳ <i>QR {QR_EXPIRY_SECONDS // 60} min mein expire hoga.</i>"
@@ -938,7 +1000,6 @@ def handle_buttons(call):
             user_qr_messages[chat_id] = sent_msg.message_id
             orders_col.update_one({"order_id": order_id}, {"$set": {"qr_msg_id": sent_msg.message_id}})
             threading.Timer(QR_EXPIRY_SECONDS, expire_qr, args=(chat_id, sent_msg.message_id, course_id, amt_key, order_id)).start()
-            threading.Thread(target=background_order_checker, args=(order_id, amt_key), daemon=True).start()
         return
 
     bot.answer_callback_query(call.id)
@@ -1056,8 +1117,9 @@ def sms_webhook(secret):
         order = orders_col.find_one({"amount": f_round, "status": {"$in": ["PENDING", "EXPIRED"]}, "created_at": {"$gte": stale_cutoff}})
     
     if order:
-        sms_pool_col.update_one({"amount": f_round, "status": "UNUSED"}, {"$set": {"status": "PROCESSED"}})
-        deliver_course_to_buyer(order, sms_text=sms_text, is_manual=False)
+        updated = sms_pool_col.update_one({"amount": f_round, "status": "UNUSED"}, {"$set": {"status": "PROCESSED"}})
+        if updated.modified_count > 0:
+            deliver_course_to_buyer(order, sms_text=sms_text, is_manual=False)
         return "matched", 200
     if amb:
         try: orig_send_message(DB_CHANNEL_ID, f"⚠️ <b>Ambiguous</b> ₹{amt_str}\n📩 <code>{sms_text[:300]}</code>", parse_mode="HTML")
@@ -1373,6 +1435,37 @@ load(); setInterval(load, 15000);
 @require_auth
 def dashboard_page(): return DASHBOARD_HTML
 
+# ==========================================
+# 🔄 GLOBAL THREADS (CPU Saver & Crash Restore)
+# ==========================================
+def global_sms_checker():
+    while True:
+        try:
+            time.sleep(10) # 10 सेकंड में एक बार डेटाबेस से चेक करेगा
+            pending_orders_list = list(orders_col.find({"status": "PENDING"}))
+            for order in pending_orders_list:
+                amt_key = order.get("amount")
+                sms_rec = sms_pool_col.find_one({"amount": amt_key, "status": "UNUSED"})
+                if sms_rec:
+                    updated = sms_pool_col.update_one({"_id": sms_rec["_id"], "status": "UNUSED"}, {"$set": {"status": "PROCESSED"}})
+                    if updated.modified_count > 0:
+                        deliver_course_to_buyer(order, sms_text=sms_rec.get("raw_text"), is_manual=False)
+        except Exception as e:
+            pass
+
+def global_memory_cleanup():
+    while True:
+        try:
+            time.sleep(3600) # हर 1 घंटे में मेमोरी क्लीन करेगा
+            now = time.time()
+            # Clear old orders cache
+            keys_to_del = [oid for oid, o in all_orders_cache.items() if now - o.get("created_at", 0) > 86400]
+            for k in keys_to_del: all_orders_cache.pop(k, None)
+            # Clear old cooldown limits
+            cool_keys = [uid for uid, t in user_cooldowns.items() if now - t > 3600]
+            for k in cool_keys: user_cooldowns.pop(k, None)
+        except Exception: pass
+
 def restore_pending_orders():
     for order in orders_col.find({"status": "PENDING"}):
         order_id, amt_key, chat_id, created_ts = order["order_id"], order.get("amount"), order.get("chat_id"), order.get("created_at", 0)
@@ -1380,13 +1473,17 @@ def restore_pending_orders():
         with pending_lock: pending_orders[amt_key], all_orders_cache[order_id] = order, order
         if remaining > 0:
             threading.Timer(remaining, expire_qr, args=(chat_id, order.get("qr_msg_id"), order["course_id"], amt_key, order_id)).start()
-            threading.Thread(target=background_order_checker, args=(order_id, amt_key, int(remaining)), daemon=True).start()
         else:
             threading.Thread(target=expire_qr, args=(chat_id, order.get("qr_msg_id"), order["course_id"], amt_key, order_id), daemon=True).start()
 
 if __name__ == "__main__":
     try: BOT_USERNAME = bot.get_me().username
     except Exception: pass
+    
+    # Start Services
     restore_pending_orders()
+    threading.Thread(target=global_sms_checker, daemon=True).start()
+    threading.Thread(target=global_memory_cleanup, daemon=True).start()
     threading.Thread(target=lambda: bot.infinity_polling(skip_pending=True), daemon=True).start()
+    
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
