@@ -99,9 +99,14 @@ def is_maintenance_mode():
     cfg = settings_col.find_one({"_id": "system_settings"})
     return cfg.get("maintenance", False) if cfg else False
 
-def get_cleanup_time():
-    cfg = settings_col.find_one({"_id": "system_settings"})
-    return cfg.get("chat_cleanup_seconds", 86400) if cfg else 86400
+def get_cleanup_settings():
+    cfg = settings_col.find_one({"_id": "system_settings"}) or {}
+    return {
+        "seconds": int(cfg.get("chat_cleanup_seconds", 86400)),
+        "del_promos": cfg.get("auto_del_promos", True),
+        "del_broadcasts": cfg.get("auto_del_broadcasts", True),
+        "del_purchases": cfg.get("auto_del_purchases", False)
+    }
 
 # ==========================================
 # 📝 TEXT FORMATTING & ACTIVITY TRACKER
@@ -113,29 +118,66 @@ def get_formatted_text(message):
 
 user_chat_messages, user_inactivity_timers, tracker_lock = {}, {}, threading.Lock()
 
-def clear_inactive_chat(chat_id):
+def clear_inactive_chat(chat_id, is_force=False, force_del_promos=True, force_del_broadcasts=True, force_del_purchases=False):
+    cfg = get_cleanup_settings()
+    
+    del_promos = force_del_promos if is_force else cfg["del_promos"]
+    del_broadcasts = force_del_broadcasts if is_force else cfg["del_broadcasts"]
+    del_purchases = force_del_purchases if is_force else cfg["del_purchases"]
+
     with tracker_lock:
-        msg_ids = user_chat_messages.pop(chat_id, [])
-        timer = user_inactivity_timers.pop(chat_id, None)
-        if timer: timer.cancel()
+        if chat_id not in user_chat_messages: return
+        msgs = user_chat_messages[chat_id]
+        to_delete = []
+        to_keep = []
+
+        for m in msgs:
+            m_type = m.get("type", "general")
+            delete_it = False
+            
+            if m_type in ["course", "menu", "general"] and del_promos:
+                delete_it = True
+            elif m_type == "broadcast" and del_broadcasts:
+                delete_it = True
+            elif m_type == "purchase" and del_purchases:
+                delete_it = True
+
+            if delete_it:
+                to_delete.append(m["id"])
+            else:
+                to_keep.append(m)
+
+        user_chat_messages[chat_id] = to_keep
+
+        if not is_force:
+            timer = user_inactivity_timers.pop(chat_id, None)
+            if timer: timer.cancel()
+
     # Anti-ban sleep per message deletion
-    for mid in msg_ids:
+    for mid in to_delete:
         try: 
             bot.delete_message(chat_id, mid)
             time.sleep(0.05)
         except Exception: pass
 
-def register_activity(chat_id, message_id=None):
+def register_activity(chat_id, message_id=None, msg_type="general"):
     if not isinstance(chat_id, int) or chat_id <= 0 or chat_id == ADMIN_ID: return
     with tracker_lock:
         if chat_id not in user_chat_messages: user_chat_messages[chat_id] = []
-        if message_id and message_id not in user_chat_messages[chat_id]: user_chat_messages[chat_id].append(message_id)
+        if message_id:
+            # Prevent duplicates
+            if not any(m['id'] == message_id for m in user_chat_messages[chat_id]):
+                user_chat_messages[chat_id].append({"id": message_id, "type": msg_type})
+        
+        cfg = get_cleanup_settings()
+        cleanup_time = cfg["seconds"]
+
         if chat_id in user_inactivity_timers: user_inactivity_timers[chat_id].cancel()
         
-        cleanup_time = get_cleanup_time()
-        new_timer = threading.Timer(cleanup_time, clear_inactive_chat, args=(chat_id,))
-        user_inactivity_timers[chat_id] = new_timer
-        new_timer.start()
+        if cleanup_time > 0: # 0 means disabled
+            new_timer = threading.Timer(cleanup_time, clear_inactive_chat, args=(chat_id, False))
+            user_inactivity_timers[chat_id] = new_timer
+            new_timer.start()
 
 orig_send_message = bot.send_message
 orig_send_photo = bot.send_photo
@@ -144,26 +186,30 @@ orig_send_document = bot.send_document
 orig_send_media_group = bot.send_media_group
 
 def tracked_send_message(chat_id, *args, **kwargs):
+    msg_type = kwargs.pop("msg_type", "general")
     msg = orig_send_message(chat_id, *args, **kwargs)
-    register_activity(chat_id, msg.message_id)
+    register_activity(chat_id, msg.message_id, msg_type)
     return msg
 bot.send_message = tracked_send_message
 
 def tracked_send_photo(chat_id, *args, **kwargs):
+    msg_type = kwargs.pop("msg_type", "general")
     msg = orig_send_photo(chat_id, *args, **kwargs)
-    register_activity(chat_id, msg.message_id)
+    register_activity(chat_id, msg.message_id, msg_type)
     return msg
 bot.send_photo = tracked_send_photo
 
 def tracked_send_video(chat_id, *args, **kwargs):
+    msg_type = kwargs.pop("msg_type", "general")
     msg = orig_send_video(chat_id, *args, **kwargs)
-    register_activity(chat_id, msg.message_id)
+    register_activity(chat_id, msg.message_id, msg_type)
     return msg
 bot.send_video = tracked_send_video
 
 def tracked_send_document(chat_id, *args, **kwargs):
+    msg_type = kwargs.pop("msg_type", "general")
     msg = orig_send_document(chat_id, *args, **kwargs)
-    register_activity(chat_id, msg.message_id)
+    register_activity(chat_id, msg.message_id, msg_type)
     return msg
 bot.send_document = tracked_send_document
 
@@ -323,7 +369,7 @@ def expire_qr(chat_id, message_id, course_id, amount_key, order_id):
         except Exception: pass
 
     markup = InlineKeyboardMarkup().row(InlineKeyboardButton("✅ Verify Payment", callback_data=f"paydone_{order_id}"))
-    try: bot.send_message(chat_id, "⏳ <b>QR Code has expired!</b>\n\nIf you have already paid, click <b>'✅ Verify Payment'</b> below.", reply_markup=markup, parse_mode="HTML")
+    try: bot.send_message(chat_id, "⏳ <b>QR Code has expired!</b>\n\nIf you have already paid, click <b>'✅ Verify Payment'</b> below.", reply_markup=markup, parse_mode="HTML", msg_type="general")
     except Exception: pass
 
 def deliver_course_to_buyer(order, sms_text=None, is_manual=False):
@@ -347,11 +393,11 @@ def deliver_course_to_buyer(order, sms_text=None, is_manual=False):
     if chat_id in user_qr_messages: del user_qr_messages[chat_id]
 
     if not course:
-        try: bot.send_message(chat_id, "⚠️ Payment verified, but pack not found. Please contact admin.")
+        try: bot.send_message(chat_id, "⚠️ Payment verified, but pack not found. Please contact admin.", msg_type="general")
         except Exception: pass
         return
 
-    try: bot.send_message(chat_id, f"🎉 <b>Payment Verified Successfully!</b>\n\n{course['secret_text']}", parse_mode="HTML", protect_content=PROTECT_CONTENT)
+    try: bot.send_message(chat_id, f"🎉 <b>Payment Verified Successfully!</b>\n\n{course['secret_text']}", parse_mode="HTML", protect_content=PROTECT_CONTENT, msg_type="purchase")
     except Exception: pass
 
     date_now = get_ist_time()
@@ -470,12 +516,12 @@ def send_course_to_user(chat_id, course):
     if not media_items:
         full_text = "".join(t.get("caption", "") + "\n\n" for t in text_items) + custom_caption
         if not full_text.strip(): full_text = f"📚 <b>Pack: {course['course_id']}</b>\nPrice: ₹{int(base_price) if base_price.is_integer() else base_price}"
-        bot.send_message(chat_id, full_text.strip(), reply_markup=markup, parse_mode="HTML", protect_content=PROTECT_CONTENT)
+        bot.send_message(chat_id, full_text.strip(), reply_markup=markup, parse_mode="HTML", protect_content=PROTECT_CONTENT, msg_type="course")
     elif len(media_items) == 1:
         it = media_items[0]
         try:
-            if it["type"] == "photo": bot.send_photo(chat_id, it["file_id"], caption=final_cap, reply_markup=markup, parse_mode="HTML", protect_content=PROTECT_CONTENT)
-            elif it["type"] == "video": bot.send_video(chat_id, it["file_id"], caption=final_cap, reply_markup=markup, parse_mode="HTML", protect_content=PROTECT_CONTENT)
+            if it["type"] == "photo": bot.send_photo(chat_id, it["file_id"], caption=final_cap, reply_markup=markup, parse_mode="HTML", protect_content=PROTECT_CONTENT, msg_type="course")
+            elif it["type"] == "video": bot.send_video(chat_id, it["file_id"], caption=final_cap, reply_markup=markup, parse_mode="HTML", protect_content=PROTECT_CONTENT, msg_type="course")
         except Exception: pass
     else:
         media_group_html = []
@@ -485,13 +531,13 @@ def send_course_to_user(chat_id, course):
             elif item["type"] == "video": media_group_html.append(InputMediaVideo(item["file_id"], caption=cap, parse_mode="HTML"))
         try:
             sent_grp = orig_send_media_group(chat_id, media_group_html, protect_content=PROTECT_CONTENT)
-            for m in sent_grp: register_activity(chat_id, m.message_id)
+            for m in sent_grp: register_activity(chat_id, m.message_id, "course")
         except Exception: pass
-        try: bot.send_message(chat_id, f"👆 <b>Choose an option to buy:</b>\n", reply_markup=markup, parse_mode="HTML")
+        try: bot.send_message(chat_id, f"👆 <b>Choose an option to buy:</b>\n", reply_markup=markup, parse_mode="HTML", msg_type="course")
         except Exception: pass
 
 def send_batch_to_user(chat_id, batch):
-    bot.send_message(chat_id, f"📦 <b>{batch['title']}</b>\nAll packs are listed below:", parse_mode="HTML")
+    bot.send_message(chat_id, f"📦 <b>{batch['title']}</b>\nAll packs are listed below:", parse_mode="HTML", msg_type="course")
     raw_cids = batch.get("course_ids", [])
     course_ids = json.loads(raw_cids) if isinstance(raw_cids, str) else raw_cids if isinstance(raw_cids, list) else []
     for cid in course_ids:
@@ -506,10 +552,10 @@ def send_custom_start_menu(chat_id):
             if b["url"].startswith("http"): markup.row(InlineKeyboardButton(b["text"], url=b["url"]))
             else: markup.row(InlineKeyboardButton(b["text"], callback_data=f"mainmenu_{b['url']}"))
         m_type, txt, fid = cfg.get("media_type"), cfg.get("text", ""), cfg.get("file_id")
-        if m_type == "photo" and fid: bot.send_photo(chat_id, fid, caption=txt, reply_markup=markup, parse_mode="HTML")
-        elif m_type == "video" and fid: bot.send_video(chat_id, fid, caption=txt, reply_markup=markup, parse_mode="HTML")
-        else: bot.send_message(chat_id, txt or "👋 Welcome to our Store!", reply_markup=markup, parse_mode="HTML")
-    else: bot.send_message(chat_id, "👋 <b>Welcome to our Store!</b>\n\nSelect an option below to get started:", reply_markup=markup, parse_mode="HTML")
+        if m_type == "photo" and fid: bot.send_photo(chat_id, fid, caption=txt, reply_markup=markup, parse_mode="HTML", msg_type="menu")
+        elif m_type == "video" and fid: bot.send_video(chat_id, fid, caption=txt, reply_markup=markup, parse_mode="HTML", msg_type="menu")
+        else: bot.send_message(chat_id, txt or "👋 Welcome to our Store!", reply_markup=markup, parse_mode="HTML", msg_type="menu")
+    else: bot.send_message(chat_id, "👋 <b>Welcome to our Store!</b>\n\nSelect an option below to get started:", reply_markup=markup, parse_mode="HTML", msg_type="menu")
 
 def send_admin_panel(chat_id):
     markup = InlineKeyboardMarkup()
@@ -532,34 +578,33 @@ def send_admin_panel(chat_id):
 def start_command(message):
     user_id = message.chat.id
     
-    # ⚠️ MAINTENANCE CHECK
     if is_maintenance_mode() and user_id != ADMIN_ID:
         orig_send_message(user_id, "⚠️ <b>Bot is currently under maintenance. / अभी बोट मेंटेनेंस पर है।</b>\n\nServers are busy or undergoing updates. Please try again after some time.\n<i>सर्वर बिजी हैं, कृपया कुछ समय बाद प्रयास करें।</i>", parse_mode="HTML")
         return
 
     if not check_rate_limit(user_id, 1): return
-    register_activity(user_id, message.message_id)
+    register_activity(user_id, message.message_id, "general")
     users_col.update_one({"user_id": user_id}, {"$set": {"user_id": user_id, "updated_at": get_ist_time()}}, upsert=True)
     param = message.text.split()[1].strip() if len(message.text.split()) > 1 else ""
 
     if param.startswith("off_"):
         offer = offers_col.find_one({"offer_code": param})
         if not offer:
-            bot.send_message(user_id, "❌ <b>This offer is invalid or has expired.</b>", parse_mode="HTML")
+            bot.send_message(user_id, "❌ <b>This offer is invalid or has expired.</b>", parse_mode="HTML", msg_type="general")
             return send_custom_start_menu(user_id)
         now_ts = time.time()
         if offer.get("expires_at_ts") and now_ts > offer["expires_at_ts"]:
-            bot.send_message(user_id, "⏳ <b>This offer has expired!</b>", parse_mode="HTML")
+            bot.send_message(user_id, "⏳ <b>This offer has expired!</b>", parse_mode="HTML", msg_type="general")
             return send_custom_start_menu(user_id)
         if offer.get("max_users", -1) != -1 and offer.get("used_count", 0) >= offer["max_users"]:
-            bot.send_message(user_id, "⚠️ <b>This offer has reached its maximum claim limit!</b>", parse_mode="HTML")
+            bot.send_message(user_id, "⚠️ <b>This offer has reached its maximum claim limit!</b>", parse_mode="HTML", msg_type="general")
             return send_custom_start_menu(user_id)
         per_user_limit = offer.get("per_user_limit", 1)
         if per_user_limit != -1 and get_offer_usage_count(user_id, offer["offer_code"]) >= per_user_limit:
-            bot.send_message(user_id, "⚠️ <b>You have already used this offer once.</b>\nIt cannot be claimed again.", parse_mode="HTML")
+            bot.send_message(user_id, "⚠️ <b>You have already used this offer once.</b>\nIt cannot be claimed again.", parse_mode="HTML", msg_type="general")
             return send_custom_start_menu(user_id)
         users_col.update_one({"user_id": user_id}, {"$set": {"active_offer_code": offer["offer_code"]}, "$unset": {"active_offer": ""}}, upsert=True)
-        bot.send_message(user_id, f"🎉 <b>Congrats! {offer['discount_percent']}% discount activated!</b>", parse_mode="HTML")
+        bot.send_message(user_id, f"🎉 <b>Congrats! {offer['discount_percent']}% discount activated!</b>", parse_mode="HTML", msg_type="general")
         if offer["target_type"] == "single":
             c = courses_col.find_one({"course_id": offer["target_course_id"]})
             if c: send_course_to_user(user_id, c)
@@ -568,11 +613,11 @@ def start_command(message):
     elif param.startswith("b_"):
         batch = batches_col.find_one({"batch_id": param})
         if batch: send_batch_to_user(user_id, batch)
-        else: bot.send_message(user_id, "❌ <b>This link has expired.</b>", parse_mode="HTML")
+        else: bot.send_message(user_id, "❌ <b>This link has expired.</b>", parse_mode="HTML", msg_type="general")
     elif param.startswith("c_"):
         course = courses_col.find_one({"course_id": param})
         if course: send_course_to_user(user_id, course)
-        else: bot.send_message(user_id, "❌ <b>This link is not available.</b>", parse_mode="HTML")
+        else: bot.send_message(user_id, "❌ <b>This link is not available.</b>", parse_mode="HTML", msg_type="general")
     elif param.startswith("f_"):
         file_data = file_links_col.find_one({"file_code": param})
         if file_data:
@@ -582,11 +627,11 @@ def start_command(message):
             if len(m_items) == 1:
                 it = m_items[0]
                 try:
-                    if it["type"] == "text": bot.send_message(user_id, it["caption"], reply_markup=markup, parse_mode="HTML", protect_content=PROTECT_CONTENT)
-                    elif it["type"] == "photo": bot.send_photo(user_id, it["file_id"], caption=it["caption"], reply_markup=markup, parse_mode="HTML", protect_content=PROTECT_CONTENT)
-                    elif it["type"] == "video": bot.send_video(user_id, it["file_id"], caption=it["caption"], reply_markup=markup, parse_mode="HTML", protect_content=PROTECT_CONTENT)
-                    elif it["type"] == "document": bot.send_document(user_id, it["file_id"], caption=it["caption"], reply_markup=markup, parse_mode="HTML", protect_content=PROTECT_CONTENT)
-                except Exception as e: bot.send_message(user_id, f"❌ Error: {e}")
+                    if it["type"] == "text": bot.send_message(user_id, it["caption"], reply_markup=markup, parse_mode="HTML", protect_content=PROTECT_CONTENT, msg_type="course")
+                    elif it["type"] == "photo": bot.send_photo(user_id, it["file_id"], caption=it["caption"], reply_markup=markup, parse_mode="HTML", protect_content=PROTECT_CONTENT, msg_type="course")
+                    elif it["type"] == "video": bot.send_video(user_id, it["file_id"], caption=it["caption"], reply_markup=markup, parse_mode="HTML", protect_content=PROTECT_CONTENT, msg_type="course")
+                    elif it["type"] == "document": bot.send_document(user_id, it["file_id"], caption=it["caption"], reply_markup=markup, parse_mode="HTML", protect_content=PROTECT_CONTENT, msg_type="course")
+                except Exception as e: bot.send_message(user_id, f"❌ Error: {e}", msg_type="general")
             elif len(m_items) > 1:
                 m_group = []
                 for it in m_items:
@@ -595,10 +640,10 @@ def start_command(message):
                     elif it["type"] == "document": m_group.append(InputMediaDocument(it["file_id"], caption=it["caption"], parse_mode="HTML"))
                 try:
                     sent = orig_send_media_group(user_id, m_group, protect_content=PROTECT_CONTENT)
-                    for m in sent: register_activity(user_id, m.message_id)
-                    if btns or any(i["type"] == "text" for i in m_items): bot.send_message(user_id, "👇", reply_markup=markup, parse_mode="HTML")
-                except Exception as e: bot.send_message(user_id, f"❌ Error: {e}")
-        else: bot.send_message(user_id, "❌ <b>File not found or expired.</b>", parse_mode="HTML")
+                    for m in sent: register_activity(user_id, m.message_id, "course")
+                    if btns or any(i["type"] == "text" for i in m_items): bot.send_message(user_id, "👇", reply_markup=markup, parse_mode="HTML", msg_type="course")
+                except Exception as e: bot.send_message(user_id, f"❌ Error: {e}", msg_type="general")
+        else: bot.send_message(user_id, "❌ <b>File not found or expired.</b>", parse_mode="HTML", msg_type="general")
     else:
         if user_id == ADMIN_ID: send_admin_panel(user_id)
         else: send_custom_start_menu(user_id)
@@ -607,23 +652,22 @@ def start_command(message):
 def handle_all_messages(message):
     user_id = message.chat.id
     
-    # ⚠️ MAINTENANCE CHECK
     if is_maintenance_mode() and user_id != ADMIN_ID:
         orig_send_message(user_id, "⚠️ <b>Bot is currently under maintenance. / अभी बोट मेंटेनेंस पर है।</b>\n\nServers are busy or undergoing updates. Please try again after some time.\n<i>सर्वर बिजी हैं, कृपया कुछ समय बाद प्रयास करें।</i>", parse_mode="HTML")
         return
 
     if not check_rate_limit(user_id, 1): return
-    register_activity(user_id, message.message_id)
+    register_activity(user_id, message.message_id, "general")
 
     state = get_user_state(user_id)
     if state and state.get("step") == "WAITING_PAYMENT_SS":
         order_id = state.get("order_id")
         order = all_orders_cache.get(order_id) or orders_col.find_one({"order_id": order_id})
         if not message.photo and not message.document:
-            bot.send_message(user_id, "❌ <b>Please send your screenshot as a photo or document.</b>", parse_mode="HTML")
+            bot.send_message(user_id, "❌ <b>Please send your screenshot as a photo or document.</b>", parse_mode="HTML", msg_type="general")
             return
         fid = message.photo[-1].file_id if message.photo else message.document.file_id
-        bot.send_message(user_id, "⏳ <b>Verification pending...</b>\nYour screenshot has been sent to admin.", parse_mode="HTML")
+        bot.send_message(user_id, "⏳ <b>Verification pending...</b>\nYour screenshot has been sent to admin.", parse_mode="HTML", msg_type="general")
         clear_user_state(user_id)
         u_str = f"@{message.from_user.username}" if message.from_user.username else "No Username"
         u_men = f"<a href='tg://user?id={user_id}'>{message.from_user.first_name}</a> ({u_str})"
@@ -855,12 +899,75 @@ def handle_all_messages(message):
                     bot.send_message(ADMIN_ID, f"✅ <b>Button Added!</b>", reply_markup=m, parse_mode="HTML")
                 except Exception: bot.send_message(ADMIN_ID, "❌ Format Error.", parse_mode="HTML")
             return
+        elif step == "BC_TIME":
+            try:
+                hrs = float(re.sub(r"[^\d.]", "", message.text.strip()))
+                m_items = admin_data[ADMIN_ID].get("media", [])
+                btns = admin_data[ADMIN_ID].get("buttons", [])
+                
+                m = InlineKeyboardMarkup()
+                for b in btns: m.row(InlineKeyboardButton(b["text"], url=b["url"]))
+                
+                bot.send_message(ADMIN_ID, "⏳ Broadcasting started...")
+                
+                def run_bc():
+                    success = 0
+                    delete_list = []
+                    for u in users_col.find():
+                        uid = u["user_id"]
+                        try:
+                            if not m_items: continue
+                            sent_ids = []
+                            if len(m_items) == 1:
+                                it = m_items[0]
+                                if it["type"] == "text": msg = orig_send_message(uid, it["caption"], reply_markup=m, parse_mode="HTML")
+                                elif it["type"] == "photo": msg = orig_send_photo(uid, it["file_id"], caption=it["caption"], reply_markup=m, parse_mode="HTML")
+                                elif it["type"] == "video": msg = orig_send_video(uid, it["file_id"], caption=it["caption"], reply_markup=m, parse_mode="HTML")
+                                elif it["type"] == "document": msg = orig_send_document(uid, it["file_id"], caption=it["caption"], reply_markup=m, parse_mode="HTML")
+                                sent_ids.append(msg.message_id)
+                            else:
+                                m_group = [InputMediaPhoto(it["file_id"], caption=it["caption"], parse_mode="HTML") if it["type"] == "photo" else InputMediaVideo(it["file_id"], caption=it["caption"], parse_mode="HTML") if it["type"] == "video" else InputMediaDocument(it["file_id"], caption=it["caption"], parse_mode="HTML") for it in m_items]
+                                sent = orig_send_media_group(uid, m_group)
+                                sent_ids.extend([s.message_id for s in sent])
+                                if btns or any(i["type"] == "text" for i in m_items): 
+                                    msg = orig_send_message(uid, "👇", reply_markup=m, parse_mode="HTML")
+                                    sent_ids.append(msg.message_id)
+                                    
+                            for mid in sent_ids:
+                                register_activity(uid, mid, "broadcast")
+                                if hrs > 0: delete_list.append((uid, mid))
+                                
+                            success += 1
+                            time.sleep(0.05)
+                        except Exception: pass
+                        
+                    bot.send_message(ADMIN_ID, f"✅ <b>Broadcast Complete!</b> ({success} users).", parse_mode="HTML")
+                    
+                    if hrs > 0:
+                        def delayed_delete(d_list):
+                            for uid, mid in d_list:
+                                try:
+                                    bot.delete_message(uid, mid)
+                                    time.sleep(0.05)
+                                except Exception: pass
+                                with tracker_lock:
+                                    if uid in user_chat_messages:
+                                        user_chat_messages[uid] = [x for x in user_chat_messages[uid] if x["id"] != mid]
+
+                        threading.Timer(hrs * 3600, delayed_delete, args=(delete_list,)).start()
+                        
+                threading.Thread(target=run_bc, daemon=True).start()
+                del admin_data[ADMIN_ID]
+                send_admin_panel(ADMIN_ID)
+                
+            except Exception:
+                bot.send_message(ADMIN_ID, "❌ Invalid number. Send 0 or higher.")
+            return
 
 @bot.callback_query_handler(func=lambda call: True)
 def handle_buttons(call):
     chat_id = call.message.chat.id
     
-    # ⚠️ MAINTENANCE CHECK (Block buttons too)
     if is_maintenance_mode() and chat_id != ADMIN_ID:
         bot.answer_callback_query(call.id, "⚠️ Bot is currently under maintenance. Please try again later.", show_alert=True)
         return
@@ -868,15 +975,15 @@ def handle_buttons(call):
     data, msg_id = call.data, call.message.message_id
     if not check_rate_limit(chat_id, 1.5): 
         return bot.answer_callback_query(call.id, "⚠️ Please slow down! Don't click too fast.", show_alert=False)
-    register_activity(chat_id)
+    register_activity(chat_id, msg_id, "general")
 
     if data == "show_intl_info":
         bot.answer_callback_query(call.id)
         cfg = settings_col.find_one({"_id": "intl_btn_cfg"})
         if not cfg:
             if INTERNATIONAL_LINK:
-                return bot.send_message(chat_id, f"🌍 <b>International Payment:</b>\n{INTERNATIONAL_LINK}", parse_mode="HTML")
-            return bot.send_message(chat_id, "ℹ️ No details available.", parse_mode="HTML")
+                return bot.send_message(chat_id, f"🌍 <b>International Payment:</b>\n{INTERNATIONAL_LINK}", parse_mode="HTML", msg_type="general")
+            return bot.send_message(chat_id, "ℹ️ No details available.", parse_mode="HTML", msg_type="general")
         
         markup = InlineKeyboardMarkup()
         for b in cfg.get("buttons", []):
@@ -888,9 +995,9 @@ def handle_buttons(call):
         photo_id = cfg.get("photo_id")
         text = cfg.get("text", "")
         if photo_id:
-            bot.send_photo(chat_id, photo_id, caption=text, reply_markup=markup if markup.keyboard else None, parse_mode="HTML")
+            bot.send_photo(chat_id, photo_id, caption=text, reply_markup=markup if markup.keyboard else None, parse_mode="HTML", msg_type="general")
         else:
-            bot.send_message(chat_id, text or "🌍 <b>International Payment Details</b>", reply_markup=markup if markup.keyboard else None, parse_mode="HTML")
+            bot.send_message(chat_id, text or "🌍 <b>International Payment Details</b>", reply_markup=markup if markup.keyboard else None, parse_mode="HTML", msg_type="general")
         return
 
     if data == "admin_custom_intl":
@@ -928,8 +1035,8 @@ def handle_buttons(call):
         bot.answer_callback_query(call.id)
         plans = settings_col.find_one({"_id": "store_plans"})
         c_ids = plans.get("course_ids", []) if plans else [c["course_id"] for c in courses_col.find().limit(10)]
-        if not c_ids: return bot.send_message(chat_id, "ℹ️ No plans available.", parse_mode="HTML")
-        bot.send_message(chat_id, "📚 <b>Available Plans:</b>", parse_mode="HTML")
+        if not c_ids: return bot.send_message(chat_id, "ℹ️ No plans available.", parse_mode="HTML", msg_type="general")
+        bot.send_message(chat_id, "📚 <b>Available Plans:</b>", parse_mode="HTML", msg_type="general")
         for cid in c_ids:
             c = courses_col.find_one({"course_id": cid})
             if c: send_course_to_user(chat_id, c)
@@ -1022,7 +1129,7 @@ def handle_buttons(call):
         
         set_user_state(chat_id, "WAITING_PAYMENT_SS", oid)
         try: 
-            prompt_msg = bot.send_message(chat_id, "📸 <b>Please send your payment screenshot here.</b>\n⏳ <i>(Please send it within 10 minutes, otherwise it will fail)</i>", parse_mode="HTML")
+            prompt_msg = bot.send_message(chat_id, "📸 <b>Please send your payment screenshot here.</b>\n⏳ <i>(Please send it within 10 minutes, otherwise it will fail)</i>", parse_mode="HTML", msg_type="general")
             threading.Timer(600, screenshot_timeout, args=(chat_id, oid, prompt_msg.message_id)).start()
         except Exception: pass
         return
@@ -1030,7 +1137,7 @@ def handle_buttons(call):
     if data.startswith("send_ss_"):
         bot.answer_callback_query(call.id)
         set_user_state(chat_id, "WAITING_PAYMENT_SS", data.replace("send_ss_", ""))
-        bot.send_message(chat_id, "📸 <b>Please send your payment screenshot.</b>", parse_mode="HTML")
+        bot.send_message(chat_id, "📸 <b>Please send your payment screenshot.</b>", parse_mode="HTML", msg_type="general")
         return
     if data.startswith("man_appr_"):
         oid = data.replace("man_appr_", "")
@@ -1058,7 +1165,7 @@ def handle_buttons(call):
             except Exception: pass
             return
         m = InlineKeyboardMarkup().row(InlineKeyboardButton("💬 Contact Admin", url=CHAT_LINK)) if CHAT_LINK else None
-        try: bot.send_message(o["chat_id"], f"❌ <b>Payment Failed!</b>\nOrder <code>{oid}</code> rejected.", reply_markup=m, parse_mode="HTML")
+        try: bot.send_message(o["chat_id"], f"❌ <b>Payment Failed!</b>\nOrder <code>{oid}</code> rejected.", reply_markup=m, parse_mode="HTML", msg_type="general")
         except Exception: pass
         bot.answer_callback_query(call.id, "❌ Rejected.", show_alert=True)
         try:
@@ -1086,7 +1193,7 @@ def handle_buttons(call):
                 else:
                     clear_user_offer(call.from_user.id, active_off_code)
 
-            # STALE BUTTON FIX
+            # --- STALE BUTTON FIX & NOTIFICATION ALERT ---
             clicked_price = None
             if call.message and call.message.reply_markup:
                 for row in call.message.reply_markup.keyboard:
@@ -1098,6 +1205,11 @@ def handle_buttons(call):
 
             if clicked_price is not None and clicked_price < final_base:
                 bot.answer_callback_query(call.id, f"⚠️ Sorry, your offer has expired! Current price is ₹{int(final_base) if final_base.is_integer() else final_base}", show_alert=True)
+                
+                try:
+                    bot.send_message(chat_id, "⚠️ <b>Offer Closed / ऑफर समाप्त!</b>\n\nYour previous offer is no longer valid. The price has been updated to the original amount.\n<i>आपका ऑफर समाप्त हो चुका है। कीमत वापस सामान्य कर दी गई है।</i>", parse_mode="HTML", msg_type="general")
+                except: pass
+
                 markup = call.message.reply_markup
                 for row in markup.keyboard:
                     for btn in row:
@@ -1108,7 +1220,7 @@ def handle_buttons(call):
                 return
 
             wait_msg = None
-            try: wait_msg = bot.send_message(chat_id, "⏳ <i>Generating your UPI QR Code... Please wait 1-2 seconds.</i>", parse_mode="HTML")
+            try: wait_msg = bot.send_message(chat_id, "⏳ <i>Generating your UPI QR Code... Please wait 1-2 seconds.</i>", parse_mode="HTML", msg_type="general")
             except Exception: pass
 
             state = get_user_state(chat_id)
@@ -1154,7 +1266,7 @@ def handle_buttons(call):
             inv = f"👤 <b>User:</b> {call.from_user.first_name}\n🆔 <b>Order:</b> <code>{order_id}</code>\n💰 <b>Amount:</b> ₹{clean_amt}\n⚠️ <b>Please pay the exact amount shown.</b>\n⏳ <i>QR will expire in {QR_EXPIRY_SECONDS // 60} minutes.</i>"
             m = InlineKeyboardMarkup()
             if CHAT_LINK: m.row(InlineKeyboardButton("💬 Chat with Admin", url=CHAT_LINK))
-            sent_msg = bot.send_photo(chat_id, photo=qr_img_bio, caption=inv, reply_markup=m, parse_mode="HTML")
+            sent_msg = bot.send_photo(chat_id, photo=qr_img_bio, caption=inv, reply_markup=m, parse_mode="HTML", msg_type="general")
             user_qr_messages[chat_id] = sent_msg.message_id
             orders_col.update_one({"order_id": order_id}, {"$set": {"qr_msg_id": sent_msg.message_id}})
             
@@ -1209,31 +1321,8 @@ def handle_buttons(call):
         admin_data[ADMIN_ID]["step"], admin_data[ADMIN_ID]["buttons"] = "BC_BUTTONS", []
         bot.send_message(ADMIN_ID, "✅ <b>Media Saved!</b> Add button or Finish.", reply_markup=InlineKeyboardMarkup().row(InlineKeyboardButton("🚀 Finish", callback_data="bc_finish")), parse_mode="HTML")
     elif data == "bc_finish":
-        m_items, btns = admin_data[ADMIN_ID].get("media", []), admin_data[ADMIN_ID].get("buttons", [])
-        m = InlineKeyboardMarkup()
-        for b in btns: m.row(InlineKeyboardButton(b["text"], url=b["url"]))
-        bot.send_message(ADMIN_ID, "⏳ Broadcasting started...")
-        success = 0
-        for u in users_col.find():
-            uid = u["user_id"]
-            try:
-                if not m_items: continue
-                if len(m_items) == 1:
-                    it = m_items[0]
-                    if it["type"] == "text": bot.send_message(uid, it["caption"], reply_markup=m, parse_mode="HTML")
-                    elif it["type"] == "photo": bot.send_photo(uid, it["file_id"], caption=it["caption"], reply_markup=m, parse_mode="HTML")
-                    elif it["type"] == "video": bot.send_video(uid, it["file_id"], caption=it["caption"], reply_markup=m, parse_mode="HTML")
-                    elif it["type"] == "document": bot.send_document(uid, it["file_id"], caption=it["caption"], reply_markup=m, parse_mode="HTML")
-                else:
-                    m_group = [InputMediaPhoto(it["file_id"], caption=it["caption"], parse_mode="HTML") if it["type"] == "photo" else InputMediaVideo(it["file_id"], caption=it["caption"], parse_mode="HTML") if it["type"] == "video" else InputMediaDocument(it["file_id"], caption=it["caption"], parse_mode="HTML") for it in m_items]
-                    sent = orig_send_media_group(uid, m_group)
-                    if btns or any(i["type"] == "text" for i in m_items): bot.send_message(uid, "👇", reply_markup=m, parse_mode="HTML")
-                success += 1
-                time.sleep(0.05)
-            except Exception: pass
-        bot.send_message(ADMIN_ID, f"✅ <b>Broadcast Complete!</b> ({success} users).", parse_mode="HTML")
-        del admin_data[ADMIN_ID]
-        send_admin_panel(ADMIN_ID)
+        admin_data[ADMIN_ID]["step"] = "BC_TIME"
+        bot.send_message(ADMIN_ID, "⏳ <b>How long should this broadcast stay? / यह ब्रॉडकास्ट कितने समय तक रहना चाहिए?</b>\n\nSend the number of <b>hours</b> (e.g. 2, 24). Or send <b>0</b> to keep it permanently.\n<i>(घंटे लिखें, या हमेशा के लिए 0 लिखें)</i>", parse_mode="HTML")
     elif data == "ftl_done":
         admin_data[ADMIN_ID]["step"], admin_data[ADMIN_ID]["buttons"] = "FTL_BUTTONS", []
         bot.send_message(ADMIN_ID, "✅ <b>Media Saved!</b> Add button or Finish.", reply_markup=InlineKeyboardMarkup().row(InlineKeyboardButton("🚀 Finish", callback_data="ftl_finish")), parse_mode="HTML")
@@ -1415,29 +1504,6 @@ def api_delete_offer(offer_code):
     offers_col.delete_one({"offer_code": offer_code})
     return jsonify({"status": "success"})
 
-@app.route("/dashboard/api/broadcast", methods=["POST"])
-@require_auth
-def api_broadcast():
-    msg = request.json.get("message")
-    btns = request.json.get("buttons", [])
-    if not msg: return jsonify({"error": "Empty message"}), 400
-    
-    markup = telebot.types.InlineKeyboardMarkup()
-    for b in btns:
-        if b.get("text") and b.get("url"):
-            markup.add(telebot.types.InlineKeyboardButton(b["text"], url=b["url"]))
-    if not markup.keyboard: markup = None
-
-    def run_bc():
-        for u in users_col.find():
-            try: 
-                bot.send_message(u["user_id"], msg, reply_markup=markup, parse_mode="HTML")
-                time.sleep(0.05)
-            except Exception: pass
-    threading.Thread(target=run_bc).start()
-    return jsonify({"status": "success"})
-
-# --- NEW: SYSTEM SETTINGS API (MAINTENANCE & CHAT CLEAR) ---
 @app.route("/dashboard/api/system-settings", methods=["GET", "POST"])
 @require_auth
 def api_system_settings():
@@ -1450,11 +1516,13 @@ def api_system_settings():
         doc = {
             "maintenance": is_maintenance_now,
             "chat_cleanup_seconds": int(data.get("cleanup_seconds", 86400)),
+            "auto_del_promos": data.get("auto_del_promos", True),
+            "auto_del_broadcasts": data.get("auto_del_broadcasts", True),
+            "auto_del_purchases": data.get("auto_del_purchases", False),
             "updated_at": get_ist_time()
         }
         settings_col.update_one({"_id": "system_settings"}, {"$set": doc}, upsert=True)
 
-        # Trigger Broadcast if Maintenance turned OFF
         if was_maintenance and not is_maintenance_now:
             def broadcast_back_online():
                 msg = "✅ <b>Bot is Back Online! / बोट चालू हो गया है!</b>\n\nMaintenance is complete. You can now continue using the bot smoothly.\n\n<i>मेंटेनेंस पूरा हो गया है, अब आप बोट का आराम से इस्तेमाल कर सकते हैं।</i>"
@@ -1462,7 +1530,7 @@ def api_system_settings():
                     if u["user_id"] != ADMIN_ID:
                         try:
                             orig_send_message(u["user_id"], msg, parse_mode="HTML")
-                            time.sleep(0.05) # MUST for anti-ban
+                            time.sleep(0.05)
                         except: pass
             threading.Thread(target=broadcast_back_online, daemon=True).start()
 
@@ -1471,18 +1539,27 @@ def api_system_settings():
     cfg = settings_col.find_one({"_id": "system_settings"}) or {}
     return jsonify({
         "maintenance": cfg.get("maintenance", False),
-        "cleanup_seconds": cfg.get("chat_cleanup_seconds", 86400)
+        "cleanup_seconds": int(cfg.get("chat_cleanup_seconds", 86400)),
+        "auto_del_promos": cfg.get("auto_del_promos", True),
+        "auto_del_broadcasts": cfg.get("auto_del_broadcasts", True),
+        "auto_del_purchases": cfg.get("auto_del_purchases", False)
     })
 
 @app.route("/dashboard/api/force-clear-chats", methods=["POST"])
 @require_auth
 def api_force_clear_chats():
+    data = request.json or {}
+    
+    del_promos = data.get("del_promos", True)
+    del_broadcasts = data.get("del_broadcasts", True)
+    del_purchases = data.get("del_purchases", False)
+
     def manual_clear_all():
         with tracker_lock:
             chats = list(user_chat_messages.keys())
         for cid in chats:
-            clear_inactive_chat(cid)
-            time.sleep(0.1) # 0.1s delay to strictly avoid Telegram FloodWait (Ban)
+            clear_inactive_chat(cid, is_force=True, force_del_promos=del_promos, force_del_broadcasts=del_broadcasts, force_del_purchases=del_purchases)
+            time.sleep(0.1)
             
     threading.Thread(target=manual_clear_all, daemon=True).start()
     return jsonify({"status": "success", "message": "Chat clearing started safely in background."})
@@ -1537,13 +1614,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .form-box input, .form-box select, .form-box textarea{width:100%; padding:8px; margin:5px 0 10px; background:var(--bg); border:1px solid var(--line); color:var(--text); border-radius:4px;}
   .form-box button{background:var(--ok); color:var(--bg); border:none; padding:10px 15px; border-radius:4px; font-weight:bold; cursor:pointer;}
   
-  /* Toggle Switch CSS */
   .switch { position: relative; display: inline-block; width: 50px; height: 24px; vertical-align: middle; margin-left:10px;}
   .switch input { opacity: 0; width: 0; height: 0; }
   .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: var(--line); transition: .4s; border-radius: 24px; }
   .slider:before { position: absolute; content: ""; height: 16px; width: 16px; left: 4px; bottom: 4px; background-color: white; transition: .4s; border-radius: 50%; }
   input:checked + .slider { background-color: var(--danger); }
   input:checked + .slider:before { transform: translateX(26px); }
+  .checkbox-lbl { display: block; margin-top: 8px; color: var(--text); cursor: pointer;}
 </style></head><body>
 <header><h2>Store Dashboard</h2><div id="clock" class="mono"></div></header>
 <div class="ledger" id="overview"></div>
@@ -1552,7 +1629,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div class="tab" data-tab="courses">Courses</div>
   <div class="tab" data-tab="offers">Offers</div>
   <div class="tab" data-tab="logs">Channel Logs</div>
-  <div class="tab" data-tab="broadcast">Broadcast</div>
   <div class="tab" data-tab="sms">SMS Pool</div>
   <div class="tab" data-tab="users">Users</div>
   <div class="tab" data-tab="settings">⚙️ Settings</div>
@@ -1597,13 +1673,6 @@ async function load(){
       <button onclick="createOffer()">Create Offer</button></div>`;
     let listHTML = o.map(x=>`<div class="item ${x.status==='Active'?'ok':'expired'}"><div class="main"><div class="name">${x.discount}% OFF - <span class="mono">${x.offer_code}</span></div><div class="sub">🔗 Link: <a href="${x.link}" target="_blank" style="color:#3ED9A0">${x.link}</a></div><div class="sub">Target: ${x.target} ${x.course?'('+x.course+')':''} | Used: ${x.used}/${x.max==-1?'∞':x.max} | Per User: ${x.per_user==-1?'∞':x.per_user+'x'} | Exp: ${x.expires}</div></div><div><button class="action-btn danger-btn" onclick="delOffer('${x.offer_code}')">🗑</button></div></div>`).join("");
     document.getElementById("list").innerHTML = formHTML + (listHTML||"No offers.");
-  } else if(curTab==="broadcast"){
-    document.getElementById("list").innerHTML = `<div class="form-box"><h3>Broadcast Message</h3>
-      <p style="font-size:12px; color:var(--muted)">Use HTML tags: &lt;b&gt;<b>Bold</b>&lt;/b&gt;, &lt;i&gt;<i>Italic</i>&lt;/i&gt;</p>
-      <textarea id="bc_msg" rows="5" placeholder="Type your message here..."></textarea>
-      <p style="font-size:12px; color:var(--muted); margin-top:10px;">Buttons (Optional) - Format: <b>Name - Link</b> (One per line)</p>
-      <textarea id="bc_btns" rows="3" placeholder="My Youtube - https://youtube.com\\nChat with me - https://t.me/yourid"></textarea>
-      <button onclick="sendBc()">🚀 Send to All Users</button></div>`;
   } else if(curTab==="logs"){
     r=await fetch("/dashboard/api/channel-logs"); let o=await r.json();
     document.getElementById("list").innerHTML = o.map(x=>`<div class="item ${x.status==='APPROVED'?'ok':'expired'}"><div class="main"><div class="name">${x.first_name} (@${x.username}) - <span class="mono">${x.user_id}</span></div><div class="sub">📺 Channel: <b style="color:var(--text)">${x.channel_name}</b></div><div class="sub">Pack: ${x.course} · ${x.date}</div></div><div style="font-weight:bold; color:var(--${x.status==='APPROVED'?'ok':'danger'})">${x.status}</div></div>`).join("")||"No logs yet.";
@@ -1615,7 +1684,7 @@ async function load(){
     document.getElementById("list").innerHTML = `
       <div class="form-box">
         <h3>🛑 Maintenance Mode</h3>
-        <p style="font-size:12px; color:var(--muted);">Turn this ON to stop users from using the bot. They will see a 'Server Busy' message. Turn OFF to instantly broadcast to everyone that bot is back online safely.</p>
+        <p style="font-size:12px; color:var(--muted);">Turn this ON to stop users from using the bot.</p>
         <div style="margin-bottom: 20px;">
           <span style="font-weight:bold;">Maintenance Mode:</span>
           <label class="switch">
@@ -1625,20 +1694,31 @@ async function load(){
         </div>
         <hr style="border-color:var(--line); margin: 20px 0;">
         
-        <h3>🧹 Auto Chat-Delete (Anti-Ban Safe)</h3>
-        <p style="font-size:12px; color:var(--muted);">Set how long the bot keeps old promo/QR messages before auto-deleting them. Faster delete keeps the chat cleaner.</p>
+        <h3>🧹 Auto Chat-Delete Settings</h3>
+        <p style="font-size:12px; color:var(--muted);">What should the bot auto-delete from user chats?</p>
         <label>Auto-Clear Timer:</label>
         <select id="cleanup_time" onchange="saveSettings()">
+            <option value="0" ${cfg.cleanup_seconds==0?'selected':''}>Disabled (Off)</option>
             <option value="3600" ${cfg.cleanup_seconds==3600?'selected':''}>1 Hour</option>
             <option value="43200" ${cfg.cleanup_seconds==43200?'selected':''}>12 Hours</option>
             <option value="86400" ${cfg.cleanup_seconds==86400?'selected':''}>24 Hours</option>
             <option value="172800" ${cfg.cleanup_seconds==172800?'selected':''}>48 Hours</option>
         </select>
+        <br>
+        <label class="checkbox-lbl"><input type="checkbox" id="auto_del_promos" ${cfg.auto_del_promos?'checked':''} onchange="saveSettings()"> 🗑️ Auto-Delete Promos, Menus & Courses</label>
+        <label class="checkbox-lbl"><input type="checkbox" id="auto_del_broadcasts" ${cfg.auto_del_broadcasts?'checked':''} onchange="saveSettings()"> 🗑️ Auto-Delete Broadcast Messages</label>
+        <label class="checkbox-lbl"><input type="checkbox" id="auto_del_purchases" ${cfg.auto_del_purchases?'checked':''} onchange="saveSettings()"> <span style="color:var(--danger)">⚠️ Auto-Delete Purchased Links/Outputs (Not Recommended)</span></label>
         
         <hr style="border-color:var(--line); margin: 20px 0;">
         <h3>⚠️ Force Clear All Chats Now</h3>
-        <p style="font-size:12px; color:var(--muted);">Clicking this will slowly and safely delete all active tracked messages across all users right now. This happens in the background to prevent Telegram bans.</p>
-        <button style="background-color:var(--danger);" onclick="forceClearChats()">🧹 Clear All Chats (Safe Mode)</button>
+        <p style="font-size:12px; color:var(--muted);">Select exactly what you want to delete immediately right now.</p>
+        
+        <label class="checkbox-lbl"><input type="checkbox" id="fc_del_promos" checked> 🗑️ Delete Promos, Menus & Courses</label>
+        <label class="checkbox-lbl"><input type="checkbox" id="fc_del_broadcasts" checked> 🗑️ Delete Broadcast Messages</label>
+        <label class="checkbox-lbl"><input type="checkbox" id="fc_del_purchases"> <span style="color:var(--danger)">⚠️ Delete Purchased Links/Outputs</span></label>
+        
+        <br>
+        <button style="background-color:var(--danger);" onclick="forceClearChats()">🧹 Clear Selected Chats Now</button>
       </div>
     `;
   } else {
@@ -1646,22 +1726,44 @@ async function load(){
     document.getElementById("list").innerHTML = o.map(x=>`<div class="item ok"><div class="main"><div class="name">ID: <span class="mono">${x.user_id}</span></div><div class="sub">Active: ${x.updated_at}</div></div></div>`).join("")||"No users.";
   }
 }
+
 async function saveSettings(){
     let m = document.getElementById("maint_toggle").checked;
     let c = document.getElementById("cleanup_time").value;
+    
+    let auto_dp = document.getElementById("auto_del_promos").checked;
+    let auto_db = document.getElementById("auto_del_broadcasts").checked;
+    let auto_dpu = document.getElementById("auto_del_purchases").checked;
+
     await fetch("/dashboard/api/system-settings", {
         method: "POST", headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({maintenance: m, cleanup_seconds: c})
+        body: JSON.stringify({
+            maintenance: m, 
+            cleanup_seconds: c, 
+            auto_del_promos: auto_dp, 
+            auto_del_broadcasts: auto_db,
+            auto_del_purchases: auto_dpu
+        })
     });
-    alert("Settings Saved!");
 }
+
 async function forceClearChats(){
-    if(confirm("Are you sure? This will delete bot messages from all user chats safely in the background.")){
-        let res = await fetch("/dashboard/api/force-clear-chats", {method: "POST"});
+    let dp = document.getElementById("fc_del_promos").checked;
+    let db = document.getElementById("fc_del_broadcasts").checked;
+    let dpu = document.getElementById("fc_del_purchases").checked;
+    
+    if(!dp && !db && !dpu) return alert("Please select at least one checkbox to delete.");
+
+    if(confirm("Are you sure? This will safely delete the selected messages in the background.")){
+        let res = await fetch("/dashboard/api/force-clear-chats", {
+            method: "POST", headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({del_promos: dp, del_broadcasts: db, del_purchases: dpu})
+        });
         let data = await res.json();
         alert(data.message);
     }
 }
+
 async function appr(id){ if(confirm("Approve order manually?")){ await fetch("/dashboard/api/orders/"+id+"/approve",{method:"POST"}); load(); } }
 async function delC(id){ if(confirm("Delete course?")){ await fetch("/dashboard/api/courses/"+id,{method:"DELETE"}); load(); } }
 async function viewBuyers(courseId){
@@ -1674,24 +1776,6 @@ async function delOffer(id){ if(confirm("Delete this offer?")){ await fetch("/da
 async function createOffer(){
   let d = { discount: document.getElementById('off_disc').value, target_type: document.getElementById('off_tgt').value, course_id: document.getElementById('off_cid').value, max_users: document.getElementById('off_max').value==-1?-1:(document.getElementById('off_max').value==0?-1:document.getElementById('off_max').value), per_user_limit: document.getElementById('off_peruser').value==0?-1:document.getElementById('off_peruser').value, hours: document.getElementById('off_hrs').value };
   await fetch("/dashboard/api/offers", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(d)}); load();
-}
-async function sendBc(){
-  let msg = document.getElementById('bc_msg').value;
-  let btnRaw = document.getElementById('bc_btns').value;
-  if(!msg) return alert("Message is empty!");
-  let btns = [];
-  if(btnRaw){
-     for(let l of btnRaw.split("\\n")){
-        if(l.includes("-")){
-           let pts = l.split("-");
-           btns.push({text: pts[0].trim(), url: pts.slice(1).join("-").trim()});
-        }
-     }
-  }
-  if(confirm("Send this broadcast to ALL users?")){
-    await fetch("/dashboard/api/broadcast", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({message: msg, buttons: btns})});
-    alert("Broadcast started in background!"); document.getElementById('bc_msg').value=""; document.getElementById('bc_btns').value="";
-  }
 }
 
 document.querySelectorAll(".tab").forEach(t=>t.addEventListener("click",()=>{ document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active")); t.classList.add("active"); curTab=t.dataset.tab; document.getElementById("subtabs").style.display=curTab==="orders"?"flex":"none"; load(); }));
