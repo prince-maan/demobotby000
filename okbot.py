@@ -286,7 +286,7 @@ def generate_unique_amount(base_amount):
         return f"{base_clean + (random.randint(1, 99) / 100):.2f}"
 
 # ==========================================
-# 🎟 OFFER VALIDATION
+# 🎟 DYNAMIC PRICE & OFFER VALIDATION
 # ==========================================
 def get_offer_usage_count(user_id, offer_code):
     return orders_col.count_documents({"user_id": user_id, "offer_id": offer_code, "status": {"$in": ["COMPLETED_AUTO", "COMPLETED_MANUAL"]}})
@@ -303,6 +303,47 @@ def check_offer_validity(offer, user_id, course_id=None):
 
 def clear_user_offer(user_id, offer_code):
     users_col.update_one({"user_id": user_id}, {"$unset": {"active_offer_code": "", "active_offer": ""}})
+
+# ⚡ DYNAMIC PRICE CALCULATOR (Calculates Base Price + Flash Hike/Drop + Promo)
+def calculate_final_price(user_id, course_id, base_amount):
+    final_price = float(base_amount)
+    applied_flash_id = None
+    
+    # 1. Check Global Flash Sale / Price Hike
+    flash_sale = settings_col.find_one({"_id": "flash_sale"})
+    if flash_sale and flash_sale.get("expires_at_ts", 0) > time.time():
+        if flash_sale["target"] == "all" or flash_sale.get("course_id") == course_id:
+            limit = flash_sale.get("limit", 0)
+            allowed = True
+            if limit > 0:
+                uses = orders_col.count_documents({"user_id": user_id, "flash_id": flash_sale["sale_id"], "status": {"$in": ["COMPLETED_AUTO", "COMPLETED_MANUAL"]}})
+                if uses >= limit: allowed = False
+            
+            if allowed:
+                pct = flash_sale["percent"]
+                if flash_sale["mode"] == "hike":
+                    final_price = final_price * (1 + pct / 100.0)
+                else:
+                    final_price = final_price * (1 - pct / 100.0)
+                final_price = round(final_price, 2)
+                applied_flash_id = flash_sale["sale_id"]
+
+    # 2. Check User Promo Offer (Applies on top of the hiked/dropped price)
+    u_rec = users_col.find_one({"user_id": user_id}) or {}
+    active_off_code = u_rec.get("active_offer_code") or (u_rec.get("active_offer") or {}).get("offer_code")
+    applied_promo_code, promo_disc_pct = None, None
+    
+    if active_off_code:
+        live_offer = offers_col.find_one({"offer_code": active_off_code})
+        is_valid, _ = check_offer_validity(live_offer, user_id, course_id)
+        if is_valid:
+            promo_disc_pct = live_offer["discount_percent"]
+            final_price = round(final_price * (1.0 - (promo_disc_pct / 100.0)), 2)
+            applied_promo_code = active_off_code
+        else:
+            clear_user_offer(user_id, active_off_code)
+            
+    return final_price, applied_flash_id, applied_promo_code, promo_disc_pct, flash_sale
 
 def update_channel_order_status(order, status_type, extra_text=""):
     channel_msg_id = order.get("channel_msg_id")
@@ -484,22 +525,15 @@ def send_course_to_user(chat_id, course):
     elif isinstance(raw_promo, list): promo_items = raw_promo
     else: promo_items = []
 
+    # ⚡ DYNAMIC PRICE CALCULATION
     base_price = float(course["amount"])
-    u_rec = users_col.find_one({"user_id": chat_id}) or {}
-    active_off_code = u_rec.get("active_offer_code") or (u_rec.get("active_offer") or {}).get("offer_code")
-    
-    display_price = base_price
-    btn_text = f"🇮🇳 UPI (Pay ₹{int(base_price) if base_price.is_integer() else base_price})"
-    
-    if active_off_code:
-        live_offer = offers_col.find_one({"offer_code": active_off_code})
-        is_valid, _ = check_offer_validity(live_offer, chat_id, course["course_id"])
-        if is_valid:
-            disc_pct = live_offer["discount_percent"]
-            display_price = round(base_price * (1.0 - (disc_pct / 100.0)), 2)
-            btn_text = f"🎉 Offer Applied (Pay ₹{int(display_price) if display_price.is_integer() else display_price})"
-        else:
-            clear_user_offer(chat_id, active_off_code)
+    final_price, applied_flash_id, applied_promo_code, promo_disc_pct, flash_sale = calculate_final_price(chat_id, course["course_id"], base_price)
+
+    btn_text = f"🇮🇳 UPI (Pay ₹{int(final_price) if final_price.is_integer() else final_price})"
+    if applied_promo_code:
+        btn_text = f"🎉 Offer Applied (Pay ₹{int(final_price) if final_price.is_integer() else final_price})"
+    elif applied_flash_id and flash_sale and flash_sale.get("mode") == "drop":
+        btn_text = f"⚡ Flash Sale (Pay ₹{int(final_price) if final_price.is_integer() else final_price})"
 
     markup = InlineKeyboardMarkup()
     markup.row(InlineKeyboardButton(btn_text, callback_data=f"pay_upi_{course['course_id']}"))
@@ -537,7 +571,7 @@ def send_course_to_user(chat_id, course):
 
     if not media_items:
         full_text = "".join(t.get("caption", "") + "\n\n" for t in text_items) + custom_caption
-        if not full_text.strip(): full_text = f"📚 <b>Pack: {course['course_id']}</b>\nPrice: ₹{int(base_price) if base_price.is_integer() else base_price}"
+        if not full_text.strip(): full_text = f"📚 <b>Pack: {course['course_id']}</b>\nPrice: ₹{int(final_price) if final_price.is_integer() else final_price}"
         bot.send_message(chat_id, full_text.strip(), reply_markup=markup, parse_mode="HTML", protect_content=PROTECT_CONTENT, msg_type="course")
     elif len(media_items) == 1:
         it = media_items[0]
@@ -588,6 +622,7 @@ def send_admin_panel(chat_id):
     markup.row(InlineKeyboardButton("📦 Pack Batch (Multi-Pack)", callback_data="admin_create_batch"))
     markup.row(InlineKeyboardButton("🎟 Create Promo Offer", callback_data="admin_create_offer"))
     markup.row(InlineKeyboardButton("📋 Manage Store Plans", callback_data="admin_manage_plans"))
+    markup.row(InlineKeyboardButton("⚡ Flash Price (Hike/Drop)", callback_data="admin_flash_price"))
     markup.row(InlineKeyboardButton("🎨 Customize Start Menu", callback_data="admin_custom_menu"))
     markup.row(InlineKeyboardButton("🌍 Custom International Button", callback_data="admin_custom_intl"))
     markup.row(InlineKeyboardButton("🔘 Global Course Buttons", callback_data="admin_global_cbtns"))
@@ -737,6 +772,50 @@ def handle_all_messages(message):
             else: bot.send_message(ADMIN_ID, f"❌ <b>Invalid ID.</b>", parse_mode="HTML")
             del admin_data[ADMIN_ID]
             return send_admin_panel(ADMIN_ID)
+        # --- FLASH PRICE SETUP ---
+        elif step == "FLASH_PCT":
+            try:
+                pct = float(re.sub(r"[^\d.]", "", message.text.strip()))
+                admin_data[ADMIN_ID]["percent"] = pct
+                admin_data[ADMIN_ID]["step"] = "FLASH_TARGET"
+                m = InlineKeyboardMarkup().row(InlineKeyboardButton("🌐 All Courses", callback_data="flash_tgt_all")).row(InlineKeyboardButton("🎯 Single Course", callback_data="flash_tgt_single"))
+                bot.send_message(ADMIN_ID, f"✅ <b>{pct}% Set!</b>\nApply to:", reply_markup=m, parse_mode="HTML")
+            except Exception: bot.send_message(ADMIN_ID, "❌ Numbers only.")
+            return
+        elif step == "FLASH_CID":
+            cid = message.text.strip()
+            if not courses_col.find_one({"course_id": cid}): return bot.send_message(ADMIN_ID, "❌ Course ID not found.")
+            admin_data[ADMIN_ID]["course_id"] = cid
+            admin_data[ADMIN_ID]["step"] = "FLASH_HOURS"
+            bot.send_message(ADMIN_ID, "⏳ <b>Active for how many hours?</b> (e.g., 24)", parse_mode="HTML")
+            return
+        elif step == "FLASH_HOURS":
+            try:
+                hrs = float(re.sub(r"[^\d.]", "", message.text.strip()))
+                admin_data[ADMIN_ID]["hours"] = hrs
+                admin_data[ADMIN_ID]["step"] = "FLASH_LIMIT"
+                bot.send_message(ADMIN_ID, "🔁 <b>How many times can a user buy at this new price?</b>\n(1 = Once per user, 0 = Unlimited):", parse_mode="HTML")
+            except Exception: bot.send_message(ADMIN_ID, "❌ Invalid hours.")
+            return
+        elif step == "FLASH_LIMIT":
+            try:
+                lim = int(re.sub(r"[^\d]", "", message.text.strip()))
+                sale_id = "fs_" + str(uuid.uuid4())[:6]
+                now_ts = time.time()
+                
+                doc = {
+                    "_id": "flash_sale", "sale_id": sale_id, "mode": admin_data[ADMIN_ID]["flash_mode"],
+                    "percent": admin_data[ADMIN_ID]["percent"], "target": admin_data[ADMIN_ID]["target"],
+                    "course_id": admin_data[ADMIN_ID].get("course_id"), "hours": admin_data[ADMIN_ID]["hours"],
+                    "limit": lim, "created_at_ts": now_ts, "expires_at_ts": now_ts + (admin_data[ADMIN_ID]["hours"] * 3600)
+                }
+                settings_col.update_one({"_id": "flash_sale"}, {"$set": doc}, upsert=True)
+                bot.send_message(ADMIN_ID, "🎉 <b>Flash Price Applied Successfully!</b>", parse_mode="HTML")
+                del admin_data[ADMIN_ID]
+                send_admin_panel(ADMIN_ID)
+            except Exception: bot.send_message(ADMIN_ID, "❌ Invalid limit.")
+            return
+        # ------------------------
         elif step == "OFFER_DISCOUNT":
             try:
                 disc = int(re.sub(r"[^\d]", "", message.text.strip()))
@@ -1003,7 +1082,7 @@ def handle_all_messages(message):
                         uid = u["user_id"]
                         try:
                             if not m_items:
-                                if len(btns) > 0:
+                                if m:
                                     msg = orig_send_message(uid, "👇", reply_markup=m, parse_mode="HTML", disable_web_page_preview=True)
                                     register_activity(uid, msg.message_id, "broadcast")
                                     if hrs > 0: delete_list.append((uid, msg.message_id))
@@ -1022,7 +1101,7 @@ def handle_all_messages(message):
                                 m_group = [InputMediaPhoto(it["file_id"], caption=it["caption"], parse_mode="HTML") if it["type"] == "photo" else InputMediaVideo(it["file_id"], caption=it["caption"], parse_mode="HTML") if it["type"] == "video" else InputMediaDocument(it["file_id"], caption=it["caption"], parse_mode="HTML") for it in m_items]
                                 sent = orig_send_media_group(uid, m_group)
                                 sent_ids.extend([s.message_id for s in sent])
-                                if btns or any(i["type"] == "text" for i in m_items): 
+                                if m or any(i["type"] == "text" for i in m_items): 
                                     msg = orig_send_message(uid, "👇", reply_markup=m, parse_mode="HTML", disable_web_page_preview=True)
                                     sent_ids.append(msg.message_id)
                                     
@@ -1076,6 +1155,33 @@ def handle_buttons(call):
     if not check_rate_limit(chat_id, 1.5): 
         return bot.answer_callback_query(call.id, "⚠️ Please slow down! Don't click too fast.", show_alert=False)
     register_activity(chat_id, msg_id, "general")
+
+    if data == "admin_flash_price":
+        bot.answer_callback_query(call.id)
+        m = InlineKeyboardMarkup()
+        m.row(InlineKeyboardButton("📈 Price Hike (+)", callback_data="flash_start_hike"), InlineKeyboardButton("📉 Price Drop (-)", callback_data="flash_start_drop"))
+        m.row(InlineKeyboardButton("🔄 Reset to Normal Prices", callback_data="flash_reset"))
+        m.row(InlineKeyboardButton("🔙 Back", callback_data="back_to_admin"))
+        bot.edit_message_text("⚡ <b>Flash Price Manager</b>\n\nIncrease or decrease prices temporarily for all or specific courses.", chat_id=chat_id, message_id=msg_id, reply_markup=m, parse_mode="HTML")
+        return
+    elif data in ["flash_start_hike", "flash_start_drop"]:
+        admin_data[ADMIN_ID] = {"step": "FLASH_PCT", "flash_mode": "hike" if data == "flash_start_hike" else "drop"}
+        bot.edit_message_text("✏️ <b>Enter Percentage:</b>\n(e.g., Send 20 for 20%)", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
+        return
+    elif data == "flash_reset":
+        settings_col.delete_one({"_id": "flash_sale"})
+        bot.edit_message_text("✅ <b>All prices reset to normal!</b>", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
+        return send_admin_panel(chat_id)
+    elif data == "flash_tgt_all":
+        admin_data[ADMIN_ID]["target"] = "all"
+        admin_data[ADMIN_ID]["step"] = "FLASH_HOURS"
+        bot.edit_message_text("⏳ <b>Active for how many hours?</b> (e.g., 24)", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
+        return
+    elif data == "flash_tgt_single":
+        admin_data[ADMIN_ID]["target"] = "single"
+        admin_data[ADMIN_ID]["step"] = "FLASH_CID"
+        bot.edit_message_text("🎯 <b>Send Course ID:</b> (e.g., c_xyz123)", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
+        return
 
     if data == "skip_course_buttons":
         admin_data[ADMIN_ID]["step"] = "COURSE_TYPE"
@@ -1335,18 +1441,7 @@ def handle_buttons(call):
         course = courses_col.find_one({"course_id": course_id})
         if course:
             base_price = float(course["amount"])
-            u_rec = users_col.find_one({"user_id": call.from_user.id}) or {}
-            active_off_code = u_rec.get("active_offer_code") or (u_rec.get("active_offer") or {}).get("offer_code")
-            
-            disc_pct, off_code, final_base = None, None, base_price
-            if active_off_code:
-                live_offer = offers_col.find_one({"offer_code": active_off_code})
-                is_valid, _reason = check_offer_validity(live_offer, call.from_user.id, course_id)
-                if is_valid:
-                    disc_pct, off_code = live_offer["discount_percent"], live_offer["offer_code"]
-                    final_base = round(base_price * (1.0 - (disc_pct / 100.0)), 2)
-                else:
-                    clear_user_offer(call.from_user.id, active_off_code)
+            final_price, applied_flash_id, applied_promo_code, promo_disc_pct, flash_sale = calculate_final_price(chat_id, course_id, base_price)
 
             clicked_price = None
             if call.message and call.message.reply_markup:
@@ -1357,18 +1452,18 @@ def handle_buttons(call):
                             if m: clicked_price = float(m.group(1))
                             break
 
-            if clicked_price is not None and clicked_price < final_base:
-                bot.answer_callback_query(call.id, f"⚠️ Sorry, your offer has expired! Current price is ₹{int(final_base) if final_base.is_integer() else final_base}", show_alert=True)
+            if clicked_price is not None and abs(clicked_price - final_price) > 0.01:
+                bot.answer_callback_query(call.id, f"⚠️ Price updated! Current price is ₹{int(final_price) if final_price.is_integer() else final_price}", show_alert=True)
                 
                 try:
-                    bot.send_message(chat_id, "⚠️ <b>Offer Closed / ऑफर समाप्त!</b>\n\nYour previous offer is no longer valid. The price has been updated to the original amount.\n<i>आपका ऑफर समाप्त हो चुका है। कीमत वापस सामान्य कर दी गई है।</i>", parse_mode="HTML", msg_type="general")
+                    bot.send_message(chat_id, f"⚠️ <b>Price Updated / कीमत बदल गई है!</b>\n\nYour previous offer is no longer valid or the price has been updated. The current price is ₹{int(final_price) if final_price.is_integer() else final_price}.\n<i>ऑफर समाप्त हो चुका है या कीमत अपडेट कर दी गई है।</i>", parse_mode="HTML", msg_type="general")
                 except: pass
 
                 markup = call.message.reply_markup
                 for row in markup.keyboard:
                     for btn in row:
                         if btn.callback_data == data:
-                            btn.text = f"🇮🇳 UPI (Pay ₹{int(final_base) if final_base.is_integer() else final_base})"
+                            btn.text = f"🇮🇳 UPI (Pay ₹{int(final_price) if final_price.is_integer() else final_price})"
                 try: bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=markup)
                 except Exception: pass
                 return
@@ -1384,14 +1479,15 @@ def handle_buttons(call):
                     try: bot.delete_message(chat_id, user_qr_messages.pop(chat_id))
                     except Exception: pass
                     
-            order_id, amt_key = str(uuid.uuid4())[:8], generate_unique_amount(final_base)
+            order_id, amt_key = str(uuid.uuid4())[:8], generate_unique_amount(final_price)
             u_men = f"<a href='tg://user?id={call.from_user.id}'>{call.from_user.first_name}</a> (@{call.from_user.username or ''})"
             o_data = {
                 "order_id": order_id, "course_id": course_id, "user_id": call.from_user.id, "chat_id": chat_id,
-                "user_mention": u_men, "amount": amt_key, "original_amount": str(base_price), "discount_percent": disc_pct,
-                "offer_id": off_code, "status": "PENDING", "created_at_str": get_ist_time(), "created_at": time.time(), "created_at_dt": datetime.now(timezone.utc), "channel_msg_id": None
+                "user_mention": u_men, "amount": amt_key, "original_amount": str(base_price), "discount_percent": promo_disc_pct,
+                "offer_id": applied_promo_code, "flash_id": applied_flash_id, "status": "PENDING", 
+                "created_at_str": get_ist_time(), "created_at": time.time(), "created_at_dt": datetime.now(timezone.utc), "channel_msg_id": None
             }
-            d_log = f"\n🎟 <b>Offer Applied:</b> {disc_pct}% OFF" if disc_pct else ""
+            d_log = f"\n🎟 <b>Offer Applied:</b> {promo_disc_pct}% OFF" if promo_disc_pct else ""
             
             ch_name_display = f"\n📺 <b>Channel:</b> {course.get('channel_name')}" if course.get("channel_name") else f"\n📚 <b>Pack:</b> <code>{course_id}</code>"
             ch_txt = f"🟡 <b>[ORDER INITIATED - QR]</b>\n\n👤 <b>User:</b> {u_men}\n🔖 <b>Order:</b> <code>{order_id}</code>{ch_name_display}\n💰 <b>Amount:</b> ₹{amt_key}{d_log}\n⏳ <b>Status:</b> ⏳ Pending"
@@ -1432,62 +1528,6 @@ def handle_buttons(call):
                 
             threading.Timer(QR_EXPIRY_SECONDS, expire_qr, args=(chat_id, sent_msg.message_id, course_id, amt_key, order_id)).start()
         return
-
-    bot.answer_callback_query(call.id)
-    if data == "admin_add_course":
-        admin_data[ADMIN_ID] = {"mode": "single", "step": "PROMO", "promo": [], "amount": None, "caption": "", "course_buttons": []}
-        bot.edit_message_text("📝 <b>Step 1/4: Promo Media OR Text</b>", chat_id=chat_id, message_id=msg_id, reply_markup=InlineKeyboardMarkup().row(InlineKeyboardButton("➡️ Next", callback_data="next_price")), parse_mode="HTML")
-    elif data == "admin_create_batch":
-        admin_data[ADMIN_ID] = {"mode": "batch", "step": "TITLE", "course_ids": []}
-        bot.edit_message_text("📦 <b>Create Pack Batch</b>\nSend Title:", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
-    elif data in ["admin_file_link", "admin_broadcast"]:
-        admin_data[ADMIN_ID] = {"step": "FTL_MEDIA" if data == "admin_file_link" else "BC_MEDIA", "media": []}
-        bot.edit_message_text(f"{'📎 File to Link' if data == 'admin_file_link' else '📢 Broadcast'}\nSend Media/Text.", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
-    elif data == "next_price" and ADMIN_ID in admin_data:
-        admin_data[ADMIN_ID]["step"] = "AMOUNT"
-        bot.edit_message_text("💰 <b>Step 2/4: Price (INR)</b>", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
-    elif data == "batch_add_next":
-        admin_data[ADMIN_ID]["step"], admin_data[ADMIN_ID]["promo"], admin_data[ADMIN_ID]["caption"], admin_data[ADMIN_ID]["course_buttons"] = "PROMO", [], "", []
-        bot.edit_message_text("📝 <b>Send promo for next pack:</b>", chat_id=chat_id, message_id=msg_id, reply_markup=InlineKeyboardMarkup().row(InlineKeyboardButton("➡️ Next", callback_data="next_price")), parse_mode="HTML")
-    elif data == "batch_finish":
-        d = admin_data.get(ADMIN_ID)
-        if d and d.get("course_ids"):
-            bid = "b_" + str(uuid.uuid4())[:6]
-            batches_col.update_one({"batch_id": bid}, {"$set": {"batch_id": bid, "title": d["title"], "course_ids": d["course_ids"]}}, upsert=True)
-            bot.edit_message_text(f"🎉 <b>Batch Created!</b>\n👉 <code>https://t.me/{BOT_USERNAME}?start={bid}</code>", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
-            del admin_data[ADMIN_ID]
-            send_admin_panel(ADMIN_ID)
-    elif data == "admin_user_info":
-        recs = list(purchases_col.find().sort("_id", -1).limit(15))
-        txt = "👥 <b>Recent Purchases:</b>\n\n" + "".join(f"👤 {r.get('username')} | 📅 {r.get('date', '')[:10]} | 📚 <code>{r.get('item_info')}</code>\n" for r in recs) if recs else "No purchases yet."
-        bot.edit_message_text(txt, chat_id=chat_id, message_id=msg_id, reply_markup=InlineKeyboardMarkup().row(InlineKeyboardButton("🔙 Back", callback_data="back_to_admin")), parse_mode="HTML")
-    elif data == "back_to_admin":
-        try: bot.delete_message(chat_id, msg_id)
-        except Exception: pass
-        send_admin_panel(chat_id)
-    elif data.startswith("mainmenu_"):
-        t = data.replace("mainmenu_", "")
-        if t.startswith("c_"):
-            c = courses_col.find_one({"course_id": t})
-            if c: send_course_to_user(chat_id, c)
-        elif t.startswith("b_"):
-            b = batches_col.find_one({"batch_id": t})
-            if b: send_batch_to_user(chat_id, b)
-    elif data == "bc_done":
-        admin_data[ADMIN_ID]["step"], admin_data[ADMIN_ID]["buttons"] = "BC_BUTTONS", []
-        bot.send_message(ADMIN_ID, "✅ <b>Media Saved!</b> Add button or Finish.", reply_markup=InlineKeyboardMarkup().row(InlineKeyboardButton("🚀 Finish", callback_data="bc_finish")), parse_mode="HTML")
-    elif data == "bc_finish":
-        admin_data[ADMIN_ID]["step"] = "BC_TIME"
-        bot.send_message(ADMIN_ID, "⏳ <b>How long should this broadcast stay? / यह ब्रॉडकास्ट कितने समय तक रहना चाहिए?</b>\n\nSend the number of <b>hours</b> (e.g. 2, 24). Or send <b>0</b> to keep it permanently.\n<i>(घंटे लिखें, या हमेशा के लिए 0 लिखें)</i>", parse_mode="HTML")
-    elif data == "ftl_done":
-        admin_data[ADMIN_ID]["step"], admin_data[ADMIN_ID]["buttons"] = "FTL_BUTTONS", []
-        bot.send_message(ADMIN_ID, "✅ <b>Media Saved!</b> Add button or Finish.", reply_markup=InlineKeyboardMarkup().row(InlineKeyboardButton("🚀 Finish", callback_data="ftl_finish")), parse_mode="HTML")
-    elif data == "ftl_finish":
-        fid = "f_" + str(uuid.uuid4())[:6]
-        file_links_col.update_one({"file_code": fid}, {"$set": {"file_code": fid, "media_data": admin_data[ADMIN_ID].get("media", []), "button_data": admin_data[ADMIN_ID].get("buttons", [])}}, upsert=True)
-        bot.send_message(ADMIN_ID, f"🎉 <b>Link Created!</b>\n👉 <code>https://t.me/{BOT_USERNAME}?start={fid}</code>", parse_mode="HTML")
-        del admin_data[ADMIN_ID]
-        send_admin_panel(ADMIN_ID)
 
 # ==========================================
 # FLASK WEB SERVER & API
@@ -1814,7 +1854,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div class="tab" data-tab="courses">Courses</div>
   <div class="tab" data-tab="offers">Offers</div>
   <div class="tab" data-tab="logs">Channel Logs</div>
-  <div class="tab" data-tab="broadcast">Broadcast</div>
   <div class="tab" data-tab="sms">SMS Pool</div>
   <div class="tab" data-tab="users">Users</div>
   <div class="tab" data-tab="settings">⚙️ Settings</div>
@@ -1859,13 +1898,6 @@ async function load(){
       <button onclick="createOffer()">Create Offer</button></div>`;
     let listHTML = o.map(x=>`<div class="item ${x.status==='Active'?'ok':'expired'}"><div class="main"><div class="name">${x.discount}% OFF - <span class="mono">${x.offer_code}</span></div><div class="sub">🔗 Link: <a href="${x.link}" target="_blank" style="color:#3ED9A0">${x.link}</a></div><div class="sub">Target: ${x.target} ${x.course?'('+x.course+')':''} | Used: ${x.used}/${x.max==-1?'∞':x.max} | Per User: ${x.per_user==-1?'∞':x.per_user+'x'} | Exp: ${x.expires}</div></div><div><button class="action-btn danger-btn" onclick="delOffer('${x.offer_code}')">🗑</button></div></div>`).join("");
     document.getElementById("list").innerHTML = formHTML + (listHTML||"No offers.");
-  } else if(curTab==="broadcast"){
-    document.getElementById("list").innerHTML = `<div class="form-box"><h3>Broadcast Message</h3>
-      <p style="font-size:12px; color:var(--muted)">Use HTML tags: &lt;b&gt;<b>Bold</b>&lt;/b&gt;, &lt;i&gt;<i>Italic</i>&lt;/i&gt;</p>
-      <textarea id="bc_msg" rows="5" placeholder="Type your message here..."></textarea>
-      <p style="font-size:12px; color:var(--muted); margin-top:10px;">Buttons (Optional) - Format: <b>Name - Link</b> (One per line)<br><i>Type <b>Close - close</b> to add a close button.</i></p>
-      <textarea id="bc_btns" rows="3" placeholder="My Youtube - https://youtube.com\\nClose - close"></textarea>
-      <button onclick="sendBc()">🚀 Send to All Users</button></div>`;
   } else if(curTab==="logs"){
     r=await fetch("/dashboard/api/channel-logs"); let o=await r.json();
     document.getElementById("list").innerHTML = o.map(x=>`<div class="item ${x.status==='APPROVED'?'ok':'expired'}"><div class="main"><div class="name">${x.first_name} (@${x.username}) - <span class="mono">${x.user_id}</span></div><div class="sub">📺 Channel: <b style="color:var(--text)">${x.channel_name}</b></div><div class="sub">Pack: ${x.course} · ${x.date}</div></div><div style="font-weight:bold; color:var(--${x.status==='APPROVED'?'ok':'danger'})">${x.status}</div></div>`).join("")||"No logs yet.";
