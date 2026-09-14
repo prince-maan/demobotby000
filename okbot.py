@@ -39,7 +39,6 @@ INTERNATIONAL_LINK = os.environ.get("INTERNATIONAL_LINK")
 
 PROTECT_CONTENT = os.environ.get("PROTECT_CONTENT", "False").strip().lower() == "true"
 QR_EXPIRY_SECONDS = int(os.environ.get("QR_EXPIRY_MINUTES", "10")) * 60
-INACTIVITY_CLEANUP_SECONDS = 86400
 STALE_ORDER_SECONDS = int(os.environ.get("STALE_ORDER_HOURS", "24")) * 3600
 SMS_POOL_TTL_HOURS = int(os.environ.get("SMS_POOL_TTL_HOURS", "5"))
 ORDER_TTL_HOURS = int(os.environ.get("ORDER_TTL_HOURS", "48"))
@@ -51,11 +50,11 @@ try:
     ADMIN_ID = int(os.environ.get("ADMIN_ID"))
     DB_CHANNEL_ID = int(os.environ.get("DB_CHANNEL_ID"))
 except (TypeError, ValueError):
-    print("❌ ERROR: 'ADMIN_ID' या 'DB_CHANNEL_ID' Environment Variable सही से सेट नहीं है।")
+    print("❌ ERROR: 'ADMIN_ID' or 'DB_CHANNEL_ID' Environment Variable is not set properly.")
     sys.exit(1)
 
 if not BOT_TOKEN or not MONGO_URI or not UPI_ID or not SMS_HOOK_SECRET:
-    print("❌ ERROR: कोई महत्वपूर्ण Environment Variable मिसिंग है।")
+    print("❌ ERROR: Required Environment Variables are missing.")
     sys.exit(1)
 
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -94,6 +93,17 @@ except Exception as e:
     sys.exit(1)
 
 # ==========================================
+# ⚙️ MAINTENANCE & AUTO-CLEAR SETTINGS
+# ==========================================
+def is_maintenance_mode():
+    cfg = settings_col.find_one({"_id": "system_settings"})
+    return cfg.get("maintenance", False) if cfg else False
+
+def get_cleanup_time():
+    cfg = settings_col.find_one({"_id": "system_settings"})
+    return cfg.get("chat_cleanup_seconds", 86400) if cfg else 86400
+
+# ==========================================
 # 📝 TEXT FORMATTING & ACTIVITY TRACKER
 # ==========================================
 def get_formatted_text(message):
@@ -106,9 +116,13 @@ user_chat_messages, user_inactivity_timers, tracker_lock = {}, {}, threading.Loc
 def clear_inactive_chat(chat_id):
     with tracker_lock:
         msg_ids = user_chat_messages.pop(chat_id, [])
-        user_inactivity_timers.pop(chat_id, None)
+        timer = user_inactivity_timers.pop(chat_id, None)
+        if timer: timer.cancel()
+    # Anti-ban sleep per message deletion
     for mid in msg_ids:
-        try: bot.delete_message(chat_id, mid)
+        try: 
+            bot.delete_message(chat_id, mid)
+            time.sleep(0.05)
         except Exception: pass
 
 def register_activity(chat_id, message_id=None):
@@ -117,7 +131,9 @@ def register_activity(chat_id, message_id=None):
         if chat_id not in user_chat_messages: user_chat_messages[chat_id] = []
         if message_id and message_id not in user_chat_messages[chat_id]: user_chat_messages[chat_id].append(message_id)
         if chat_id in user_inactivity_timers: user_inactivity_timers[chat_id].cancel()
-        new_timer = threading.Timer(INACTIVITY_CLEANUP_SECONDS, clear_inactive_chat, args=(chat_id,))
+        
+        cleanup_time = get_cleanup_time()
+        new_timer = threading.Timer(cleanup_time, clear_inactive_chat, args=(chat_id,))
         user_inactivity_timers[chat_id] = new_timer
         new_timer.start()
 
@@ -186,7 +202,7 @@ def generate_upi_qr(amount, order_id):
     return bio, clean_amt
 
 # ==========================================
-# 🛡️ RATE LIMITER & STATE MANAGEMENT (Crash Proof)
+# 🛡️ RATE LIMITER & STATE MANAGEMENT
 # ==========================================
 admin_data, user_states, user_qr_messages, pending_orders, all_orders_cache = {}, {}, {}, {}, {}
 user_cooldowns = {}
@@ -275,7 +291,7 @@ def screenshot_timeout(chat_id, order_id, prompt_msg_id):
     if state and state.get("step") == "WAITING_PAYMENT_SS" and state.get("order_id") == order_id:
         clear_user_state(chat_id) 
         try:
-            bot.edit_message_text("⏳ <b>समय समाप्त!</b>\nआपने 10 मिनट के अंदर स्क्रीनशॉट नहीं भेजा।\nयह वेरिफिकेशन रद्द कर दिया गया है, कृपया कोर्स पर दोबारा क्लिक करें।", chat_id=chat_id, message_id=prompt_msg_id, parse_mode="HTML")
+            bot.edit_message_text("⏳ <b>Time is up!</b>\nYou didn't send the screenshot within 10 minutes.\nVerification failed. Please click on the pack again.", chat_id=chat_id, message_id=prompt_msg_id, parse_mode="HTML")
         except Exception:
             pass
 
@@ -291,10 +307,8 @@ def expire_qr(chat_id, message_id, course_id, amount_key, order_id):
             deliver_course_to_buyer(order, sms_text=sms_rec.get("raw_text"), is_manual=False)
             return
 
-    # Atomic Update for Expiry to prevent Race Conditions
     res = orders_col.update_one({"order_id": order_id, "status": "PENDING"}, {"$set": {"status": "EXPIRED"}})
-    if res.modified_count == 0:
-        return 
+    if res.modified_count == 0: return 
 
     order["status"] = "EXPIRED"
     update_channel_order_status(order, "EXPIRED")
@@ -309,7 +323,7 @@ def expire_qr(chat_id, message_id, course_id, amount_key, order_id):
         except Exception: pass
 
     markup = InlineKeyboardMarkup().row(InlineKeyboardButton("✅ Verify Payment", callback_data=f"paydone_{order_id}"))
-    try: bot.send_message(chat_id, "⏳ <b>क्यूआर कोड का समय समाप्त!</b>\n\nअगर आपने पेमेंट कर दिया है, तो नीचे <b>'✅ Verify Payment'</b> दबाएं।", reply_markup=markup, parse_mode="HTML")
+    try: bot.send_message(chat_id, "⏳ <b>QR Code has expired!</b>\n\nIf you have already paid, click <b>'✅ Verify Payment'</b> below.", reply_markup=markup, parse_mode="HTML")
     except Exception: pass
 
 def deliver_course_to_buyer(order, sms_text=None, is_manual=False):
@@ -317,9 +331,8 @@ def deliver_course_to_buyer(order, sms_text=None, is_manual=False):
     course = courses_col.find_one({"course_id": course_id})
     new_status = "COMPLETED_MANUAL" if is_manual else "COMPLETED_AUTO"
     
-    # Atomic Lock
     res = orders_col.update_one({"order_id": order_id, "status": {"$in": ["PENDING", "EXPIRED"]}}, {"$set": {"status": new_status, "delivered_at": get_ist_time(), "delivered_at_ts": time.time()}})
-    if res.modified_count == 0: return # Prevents double delivery
+    if res.modified_count == 0: return 
 
     order["status"] = new_status
     with pending_lock: pending_orders.pop(order.get("amount"), None)
@@ -334,7 +347,7 @@ def deliver_course_to_buyer(order, sms_text=None, is_manual=False):
     if chat_id in user_qr_messages: del user_qr_messages[chat_id]
 
     if not course:
-        try: bot.send_message(chat_id, "⚠️ Payment verify ho gayi hai, par pack nahi mila. Admin se sampark karein.")
+        try: bot.send_message(chat_id, "⚠️ Payment verified, but pack not found. Please contact admin.")
         except Exception: pass
         return
 
@@ -356,7 +369,7 @@ def deliver_course_to_buyer(order, sms_text=None, is_manual=False):
     if manual_msg_id and not is_manual:
         try:
             bot.edit_message_reply_markup(DB_CHANNEL_ID, manual_msg_id, reply_markup=None)
-            orig_send_message(DB_CHANNEL_ID, f"✅ <b>ORDER {order_id} ऑटोमैटिक रूप से वेरिफाई और डिलीवर हो गया</b> (delayed SMS मिल गया)।", parse_mode="HTML")
+            orig_send_message(DB_CHANNEL_ID, f"✅ <b>ORDER {order_id} Auto-Verified (delayed SMS received)</b>.", parse_mode="HTML")
         except Exception: pass
 
 # ==========================================
@@ -374,8 +387,7 @@ def handle_join_request(message):
             course = c
             break
             
-    if not course: 
-        return
+    if not course: return
         
     course_id = course["course_id"]
     channel_name = course.get("channel_name") or message.chat.title or f"Private Channel/Group"
@@ -390,13 +402,8 @@ def handle_join_request(message):
         try: 
             bot.approve_chat_join_request(chat_id, user_id)
             channel_logs_col.insert_one({
-                "user_id": user_id, 
-                "first_name": u_first_name,
-                "username": u_username,
-                "course_id": course_id, 
-                "channel_name": channel_name, 
-                "status": "APPROVED", 
-                "date": now_str
+                "user_id": user_id, "first_name": u_first_name, "username": u_username,
+                "course_id": course_id, "channel_name": channel_name, "status": "APPROVED", "date": now_str
             })
             orig_send_message(user_id, f"✅ <b>Request Approved!</b>\nWelcome to <b>{channel_name}</b>.", parse_mode="HTML")
         except Exception: pass
@@ -404,16 +411,10 @@ def handle_join_request(message):
         try:
             bot.decline_chat_join_request(chat_id, user_id)
             channel_logs_col.insert_one({
-                "user_id": user_id, 
-                "first_name": u_first_name,
-                "username": u_username,
-                "course_id": course_id, 
-                "channel_name": channel_name, 
-                "status": "DENIED", 
-                "date": now_str
+                "user_id": user_id, "first_name": u_first_name, "username": u_username,
+                "course_id": course_id, "channel_name": channel_name, "status": "DENIED", "date": now_str
             })
             orig_send_message(user_id, f"❌ <b>Access Denied!</b>\nYou haven't purchased this pack yet. Please buy it from the bot first.", parse_mode="HTML")
-            
             log_msg = f"🚫 <b>[JOIN DENIED - NO PAYMENT]</b>\n\n👤 <b>User:</b> {u_men} (<code>{user_id}</code>)\n📺 <b>Channel:</b> {channel_name}\n⏰ <b>Time:</b> {now_str}"
             orig_send_message(DB_CHANNEL_ID, log_msg, parse_mode="HTML")
         except Exception: pass
@@ -429,9 +430,33 @@ def send_course_to_user(chat_id, course):
     elif isinstance(raw_promo, list): promo_items = raw_promo
     else: promo_items = []
 
-    markup = InlineKeyboardMarkup().row(InlineKeyboardButton(f"🇮🇳 UPI (Pay ₹{course['amount']})", callback_data=f"pay_upi_{course['course_id']}"))
+    base_price = float(course["amount"])
+    u_rec = users_col.find_one({"user_id": chat_id}) or {}
+    active_off_code = u_rec.get("active_offer_code") or (u_rec.get("active_offer") or {}).get("offer_code")
+    
+    display_price = base_price
+    btn_text = f"🇮🇳 UPI (Pay ₹{int(base_price) if base_price.is_integer() else base_price})"
+    
+    if active_off_code:
+        live_offer = offers_col.find_one({"offer_code": active_off_code})
+        is_valid, _ = check_offer_validity(live_offer, chat_id, course["course_id"])
+        if is_valid:
+            disc_pct = live_offer["discount_percent"]
+            display_price = round(base_price * (1.0 - (disc_pct / 100.0)), 2)
+            btn_text = f"🎉 Offer Applied (Pay ₹{int(display_price) if display_price.is_integer() else display_price})"
+        else:
+            clear_user_offer(chat_id, active_off_code)
+
+    markup = InlineKeyboardMarkup().row(InlineKeyboardButton(btn_text, callback_data=f"pay_upi_{course['course_id']}"))
     btn_row = []
-    if INTERNATIONAL_LINK: btn_row.append(InlineKeyboardButton("🌍 International", url=INTERNATIONAL_LINK))
+    
+    intl_cfg = settings_col.find_one({"_id": "intl_btn_cfg"})
+    if intl_cfg:
+        b_name = intl_cfg.get("btn_name", "🌍 International")
+        btn_row.append(InlineKeyboardButton(b_name, callback_data="show_intl_info"))
+    elif INTERNATIONAL_LINK:
+        btn_row.append(InlineKeyboardButton("🌍 International", url=INTERNATIONAL_LINK))
+
     if CHAT_LINK: btn_row.append(InlineKeyboardButton("💬 Chat with Me", url=CHAT_LINK))
     if btn_row: markup.row(*btn_row)
 
@@ -444,7 +469,7 @@ def send_course_to_user(chat_id, course):
 
     if not media_items:
         full_text = "".join(t.get("caption", "") + "\n\n" for t in text_items) + custom_caption
-        if not full_text.strip(): full_text = f"📚 <b>Pack: {course['course_id']}</b>\nPrice: ₹{course['amount']}"
+        if not full_text.strip(): full_text = f"📚 <b>Pack: {course['course_id']}</b>\nPrice: ₹{int(base_price) if base_price.is_integer() else base_price}"
         bot.send_message(chat_id, full_text.strip(), reply_markup=markup, parse_mode="HTML", protect_content=PROTECT_CONTENT)
     elif len(media_items) == 1:
         it = media_items[0]
@@ -462,7 +487,7 @@ def send_course_to_user(chat_id, course):
             sent_grp = orig_send_media_group(chat_id, media_group_html, protect_content=PROTECT_CONTENT)
             for m in sent_grp: register_activity(chat_id, m.message_id)
         except Exception: pass
-        try: bot.send_message(chat_id, f"👆 <b>Choose an option to buy (₹{course['amount']}):</b>\n", reply_markup=markup, parse_mode="HTML")
+        try: bot.send_message(chat_id, f"👆 <b>Choose an option to buy:</b>\n", reply_markup=markup, parse_mode="HTML")
         except Exception: pass
 
 def send_batch_to_user(chat_id, batch):
@@ -494,6 +519,7 @@ def send_admin_panel(chat_id):
     markup.row(InlineKeyboardButton("🎟 Create Promo Offer", callback_data="admin_create_offer"))
     markup.row(InlineKeyboardButton("📋 Manage Store Plans", callback_data="admin_manage_plans"))
     markup.row(InlineKeyboardButton("🎨 Customize Start Menu", callback_data="admin_custom_menu"))
+    markup.row(InlineKeyboardButton("🌍 Custom International Button", callback_data="admin_custom_intl"))
     markup.row(InlineKeyboardButton("🔗 Advanced File to Link", callback_data="admin_file_link"))
     markup.row(InlineKeyboardButton("📢 Advanced Broadcast", callback_data="admin_broadcast"))
     markup.row(InlineKeyboardButton("👥 User Info", callback_data="admin_user_info"))
@@ -505,6 +531,12 @@ def send_admin_panel(chat_id):
 @bot.message_handler(commands=["start"])
 def start_command(message):
     user_id = message.chat.id
+    
+    # ⚠️ MAINTENANCE CHECK
+    if is_maintenance_mode() and user_id != ADMIN_ID:
+        orig_send_message(user_id, "⚠️ <b>Bot is currently under maintenance. / अभी बोट मेंटेनेंस पर है।</b>\n\nServers are busy or undergoing updates. Please try again after some time.\n<i>सर्वर बिजी हैं, कृपया कुछ समय बाद प्रयास करें।</i>", parse_mode="HTML")
+        return
+
     if not check_rate_limit(user_id, 1): return
     register_activity(user_id, message.message_id)
     users_col.update_one({"user_id": user_id}, {"$set": {"user_id": user_id, "updated_at": get_ist_time()}}, upsert=True)
@@ -524,7 +556,7 @@ def start_command(message):
             return send_custom_start_menu(user_id)
         per_user_limit = offer.get("per_user_limit", 1)
         if per_user_limit != -1 and get_offer_usage_count(user_id, offer["offer_code"]) >= per_user_limit:
-            bot.send_message(user_id, "⚠️ <b>Aapne yeh offer pehle claim karke istemal kar liya hai.</b>\nYeh offer dobara claim nahi ho sakta.", parse_mode="HTML")
+            bot.send_message(user_id, "⚠️ <b>You have already used this offer once.</b>\nIt cannot be claimed again.", parse_mode="HTML")
             return send_custom_start_menu(user_id)
         users_col.update_one({"user_id": user_id}, {"$set": {"active_offer_code": offer["offer_code"]}, "$unset": {"active_offer": ""}}, upsert=True)
         bot.send_message(user_id, f"🎉 <b>Congrats! {offer['discount_percent']}% discount activated!</b>", parse_mode="HTML")
@@ -574,6 +606,12 @@ def start_command(message):
 @bot.message_handler(content_types=["photo", "video", "document", "text"])
 def handle_all_messages(message):
     user_id = message.chat.id
+    
+    # ⚠️ MAINTENANCE CHECK
+    if is_maintenance_mode() and user_id != ADMIN_ID:
+        orig_send_message(user_id, "⚠️ <b>Bot is currently under maintenance. / अभी बोट मेंटेनेंस पर है।</b>\n\nServers are busy or undergoing updates. Please try again after some time.\n<i>सर्वर बिजी हैं, कृपया कुछ समय बाद प्रयास करें।</i>", parse_mode="HTML")
+        return
+
     if not check_rate_limit(user_id, 1): return
     register_activity(user_id, message.message_id)
 
@@ -643,7 +681,7 @@ def handle_all_messages(message):
             try:
                 lim = int(re.sub(r"[^\d]", "", message.text.strip()))
                 admin_data[ADMIN_ID]["max_users"], admin_data[ADMIN_ID]["step"] = -1 if lim == 0 else lim, "OFFER_PERUSER"
-                bot.send_message(ADMIN_ID, "🔁 <b>Ek user kitni baar yeh offer claim/use kar sakta hai?</b>\n(<b>1</b> = sirf ek baar hi — recommended, taaki koi doosre course par offer reuse na kar sake. <b>0</b> = unlimited baar):", parse_mode="HTML")
+                bot.send_message(ADMIN_ID, "🔁 <b>How many times can a user claim this offer?</b>\n(<b>1</b> = just once per user — recommended. <b>0</b> = unlimited):", parse_mode="HTML")
             except Exception: bot.send_message(ADMIN_ID, "❌ Invalid number.")
             return
         elif step == "OFFER_PERUSER":
@@ -687,6 +725,35 @@ def handle_all_messages(message):
                     m = InlineKeyboardMarkup().row(InlineKeyboardButton("🚀 Finish & Save Menu", callback_data="menu_finish_save"))
                     bot.send_message(ADMIN_ID, f"✅ <b>Button Added! ({len(admin_data[ADMIN_ID]['buttons'])})</b>", reply_markup=m, parse_mode="HTML")
                 except Exception: bot.send_message(ADMIN_ID, "❌ Format error. <code>Name - Link</code>", parse_mode="HTML")
+            return
+        elif step == "INTL_SET_NAME":
+            b_name = message.text.strip()
+            if not b_name: return bot.send_message(ADMIN_ID, "❌ <b>Name cannot be empty. Send valid text:</b>", parse_mode="HTML")
+            admin_data[ADMIN_ID]["intl_name"] = b_name
+            admin_data[ADMIN_ID]["step"] = "INTL_SET_CONTENT"
+            bot.send_message(ADMIN_ID, f"✅ <b>Button Name Saved:</b> <code>{b_name}</code>\n\n📝 <b>Step 2:</b> Send Photo with Caption OR send Plain Text for this button's page:", parse_mode="HTML")
+            return
+        elif step == "INTL_SET_CONTENT":
+            fid = message.photo[-1].file_id if message.photo else None
+            txt = get_formatted_text(message)
+            admin_data[ADMIN_ID]["intl_photo"] = fid
+            admin_data[ADMIN_ID]["intl_text"] = txt
+            admin_data[ADMIN_ID]["intl_buttons"] = []
+            admin_data[ADMIN_ID]["step"] = "INTL_ADD_BUTTONS"
+            m = InlineKeyboardMarkup().row(InlineKeyboardButton("🚀 Finish & Save", callback_data="intl_finish_save"))
+            bot.send_message(ADMIN_ID, "✅ <b>Message/Photo Saved!</b>\n\n🔘 <b>Step 3: Add Action Buttons (Multiple - 10, 20, 30 etc.)</b>\nFormat: <code>Button Text - URL</code>\n\n<i>Jab saare buttons add ho jayein, toh neeche 'Finish & Save' dabayein.</i>", reply_markup=m, parse_mode="HTML")
+            return
+        elif step == "INTL_ADD_BUTTONS":
+            txt = message.text.strip()
+            if " - " in txt:
+                try:
+                    t, u = txt.split(" - ", 1)
+                    admin_data[ADMIN_ID]["intl_buttons"].append({"text": t.strip(), "url": u.strip()})
+                    m = InlineKeyboardMarkup().row(InlineKeyboardButton("🚀 Finish & Save", callback_data="intl_finish_save"))
+                    bot.send_message(ADMIN_ID, f"✅ <b>Button Added! ({len(admin_data[ADMIN_ID]['intl_buttons'])})</b>\nSend another <code>Text - URL</code> or finish:", reply_markup=m, parse_mode="HTML")
+                except Exception: bot.send_message(ADMIN_ID, "❌ Format error. <code>Name - Link</code>", parse_mode="HTML")
+            else:
+                bot.send_message(ADMIN_ID, "❌ Format must be <code>Button Name - URL</code>\nExample: <code>Binance Pay - https://...</code>", parse_mode="HTML")
             return
         elif step == "PROMO":
             mt, fid = "text", None
@@ -734,7 +801,7 @@ def handle_all_messages(message):
                     channel_id = int(text)
             
             if not channel_id:
-                return bot.send_message(ADMIN_ID, "❌ कृपया किसी Private Channel/Group की लिंक भेजें (जैसे https://t.me/c/123456.../1) या मैसेज फॉरवर्ड करें।")
+                return bot.send_message(ADMIN_ID, "❌ Please forward a message from the Private Channel/Group or send its link.")
             
             try:
                 chat_info = bot.get_chat(channel_id)
@@ -791,10 +858,71 @@ def handle_all_messages(message):
 
 @bot.callback_query_handler(func=lambda call: True)
 def handle_buttons(call):
-    data, chat_id, msg_id = call.data, call.message.chat.id, call.message.message_id
+    chat_id = call.message.chat.id
+    
+    # ⚠️ MAINTENANCE CHECK (Block buttons too)
+    if is_maintenance_mode() and chat_id != ADMIN_ID:
+        bot.answer_callback_query(call.id, "⚠️ Bot is currently under maintenance. Please try again later.", show_alert=True)
+        return
+
+    data, msg_id = call.data, call.message.message_id
     if not check_rate_limit(chat_id, 1.5): 
-        return bot.answer_callback_query(call.id, "⚠️ थोड़ा धीमे! (Slow down)", show_alert=False)
+        return bot.answer_callback_query(call.id, "⚠️ Please slow down! Don't click too fast.", show_alert=False)
     register_activity(chat_id)
+
+    if data == "show_intl_info":
+        bot.answer_callback_query(call.id)
+        cfg = settings_col.find_one({"_id": "intl_btn_cfg"})
+        if not cfg:
+            if INTERNATIONAL_LINK:
+                return bot.send_message(chat_id, f"🌍 <b>International Payment:</b>\n{INTERNATIONAL_LINK}", parse_mode="HTML")
+            return bot.send_message(chat_id, "ℹ️ No details available.", parse_mode="HTML")
+        
+        markup = InlineKeyboardMarkup()
+        for b in cfg.get("buttons", []):
+            if b.get("url", "").startswith("http"):
+                markup.row(InlineKeyboardButton(b["text"], url=b["url"]))
+            else:
+                markup.row(InlineKeyboardButton(b["text"], callback_data=b["url"]))
+        
+        photo_id = cfg.get("photo_id")
+        text = cfg.get("text", "")
+        if photo_id:
+            bot.send_photo(chat_id, photo_id, caption=text, reply_markup=markup if markup.keyboard else None, parse_mode="HTML")
+        else:
+            bot.send_message(chat_id, text or "🌍 <b>International Payment Details</b>", reply_markup=markup if markup.keyboard else None, parse_mode="HTML")
+        return
+
+    if data == "admin_custom_intl":
+        bot.answer_callback_query(call.id)
+        m = InlineKeyboardMarkup().row(InlineKeyboardButton("✏️ Customize", callback_data="intl_customize")).row(InlineKeyboardButton("🗑 Reset Default", callback_data="intl_reset_default")).row(InlineKeyboardButton("🔙 Back", callback_data="back_to_admin"))
+        bot.edit_message_text("🌍 <b>Customize International Button</b>\n\nChoose an action:", chat_id=chat_id, message_id=msg_id, reply_markup=m, parse_mode="HTML")
+        return
+    elif data == "intl_customize":
+        bot.answer_callback_query(call.id)
+        admin_data[ADMIN_ID] = {"step": "INTL_SET_NAME"}
+        bot.edit_message_text("✏️ <b>Step 1/3:</b> Send the <b>Name of the Button</b> (e.g. <code>🌍 International Pay</code>):", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
+        return
+    elif data == "intl_finish_save":
+        bot.answer_callback_query(call.id)
+        d = admin_data.get(ADMIN_ID, {})
+        doc = {
+            "_id": "intl_btn_cfg",
+            "btn_name": d.get("intl_name", "🌍 International"),
+            "photo_id": d.get("intl_photo"),
+            "text": d.get("intl_text", ""),
+            "buttons": d.get("intl_buttons", []),
+            "updated_at": get_ist_time()
+        }
+        settings_col.update_one({"_id": "intl_btn_cfg"}, {"$set": doc}, upsert=True)
+        del admin_data[ADMIN_ID]
+        bot.edit_message_text("🎉 <b>International Button settings saved successfully!</b>", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
+        return send_admin_panel(chat_id)
+    elif data == "intl_reset_default":
+        bot.answer_callback_query(call.id)
+        settings_col.delete_one({"_id": "intl_btn_cfg"})
+        bot.edit_message_text("✅ <b>Reset to default International Button!</b>", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
+        return send_admin_panel(chat_id)
 
     if data == "user_view_plans":
         bot.answer_callback_query(call.id)
@@ -894,7 +1022,7 @@ def handle_buttons(call):
         
         set_user_state(chat_id, "WAITING_PAYMENT_SS", oid)
         try: 
-            prompt_msg = bot.send_message(chat_id, "📸 <b>अपना पेमेंट स्क्रीनशॉट यहाँ भेजें।</b>\n⏳ <i>(कृपया 10 मिनट के अंदर भेजें, अन्यथा यह फेल हो जाएगा)</i>", parse_mode="HTML")
+            prompt_msg = bot.send_message(chat_id, "📸 <b>Please send your payment screenshot here.</b>\n⏳ <i>(Please send it within 10 minutes, otherwise it will fail)</i>", parse_mode="HTML")
             threading.Timer(600, screenshot_timeout, args=(chat_id, oid, prompt_msg.message_id)).start()
         except Exception: pass
         return
@@ -938,21 +1066,16 @@ def handle_buttons(call):
             orig_send_message(chat_id, f"❌ <b>ORDER {oid} REJECTED</b>", reply_to_message_id=msg_id, parse_mode="HTML")
         except Exception: pass
         return
+        
     if data.startswith("pay_upi_"):
-        bot.answer_callback_query(call.id, "⏳ Generating Fresh QR...", show_alert=False)
+        bot.answer_callback_query(call.id, "⏳ Please wait...", show_alert=False)
         course_id = data.replace("pay_upi_", "")
         course = courses_col.find_one({"course_id": course_id})
         if course:
-            state = get_user_state(chat_id)
-            if state and state.get("step") == "PENDING_UPI":
-                with pending_lock: pending_orders.pop(state.get("amount_key", ""), None)
-                if chat_id in user_qr_messages:
-                    try: bot.delete_message(chat_id, user_qr_messages.pop(chat_id))
-                    except Exception: pass
-            
             base_price = float(course["amount"])
             u_rec = users_col.find_one({"user_id": call.from_user.id}) or {}
             active_off_code = u_rec.get("active_offer_code") or (u_rec.get("active_offer") or {}).get("offer_code")
+            
             disc_pct, off_code, final_base = None, None, base_price
             if active_off_code:
                 live_offer = offers_col.find_one({"offer_code": active_off_code})
@@ -962,6 +1085,38 @@ def handle_buttons(call):
                     final_base = round(base_price * (1.0 - (disc_pct / 100.0)), 2)
                 else:
                     clear_user_offer(call.from_user.id, active_off_code)
+
+            # STALE BUTTON FIX
+            clicked_price = None
+            if call.message and call.message.reply_markup:
+                for row in call.message.reply_markup.keyboard:
+                    for btn in row:
+                        if btn.callback_data == data:
+                            m = re.search(r'₹([\d\.]+)', btn.text)
+                            if m: clicked_price = float(m.group(1))
+                            break
+
+            if clicked_price is not None and clicked_price < final_base:
+                bot.answer_callback_query(call.id, f"⚠️ Sorry, your offer has expired! Current price is ₹{int(final_base) if final_base.is_integer() else final_base}", show_alert=True)
+                markup = call.message.reply_markup
+                for row in markup.keyboard:
+                    for btn in row:
+                        if btn.callback_data == data:
+                            btn.text = f"🇮🇳 UPI (Pay ₹{int(final_base) if final_base.is_integer() else final_base})"
+                try: bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=markup)
+                except Exception: pass
+                return
+
+            wait_msg = None
+            try: wait_msg = bot.send_message(chat_id, "⏳ <i>Generating your UPI QR Code... Please wait 1-2 seconds.</i>", parse_mode="HTML")
+            except Exception: pass
+
+            state = get_user_state(chat_id)
+            if state and state.get("step") == "PENDING_UPI":
+                with pending_lock: pending_orders.pop(state.get("amount_key", ""), None)
+                if chat_id in user_qr_messages:
+                    try: bot.delete_message(chat_id, user_qr_messages.pop(chat_id))
+                    except Exception: pass
                     
             order_id, amt_key = str(uuid.uuid4())[:8], generate_unique_amount(final_base)
             u_men = f"<a href='tg://user?id={call.from_user.id}'>{call.from_user.first_name}</a> (@{call.from_user.username or ''})"
@@ -973,7 +1128,7 @@ def handle_buttons(call):
             d_log = f"\n🎟 <b>Offer Applied:</b> {disc_pct}% OFF" if disc_pct else ""
             
             ch_name_display = f"\n📺 <b>Channel:</b> {course.get('channel_name')}" if course.get("channel_name") else f"\n📚 <b>Pack:</b> <code>{course_id}</code>"
-            ch_txt = f"🟡 <b>[ORDER INITIATED - QR]</b>\n\n👤 <b>User:</b> {u_men}\n🔖 <b>Order:</b> <code>{order_id}</code>{ch_name_display}\n💰 <b>Amount:</b> ₹{amt_key}{d_log}\n⏳ <b>Status:</b> ⏳ पेंडिंग"
+            ch_txt = f"🟡 <b>[ORDER INITIATED - QR]</b>\n\n👤 <b>User:</b> {u_men}\n🔖 <b>Order:</b> <code>{order_id}</code>{ch_name_display}\n💰 <b>Amount:</b> ₹{amt_key}{d_log}\n⏳ <b>Status:</b> ⏳ Pending"
             
             try:
                 ch_msg = bot.send_message(DB_CHANNEL_ID, ch_txt, reply_markup=InlineKeyboardMarkup().row(InlineKeyboardButton("💬 Chat", url=f"tg://user?id={call.from_user.id}")), parse_mode="HTML")
@@ -990,15 +1145,23 @@ def handle_buttons(call):
             if sms_rec:
                 updated = sms_pool_col.update_one({"_id": sms_rec["_id"], "status": "UNUSED"}, {"$set": {"status": "PROCESSED"}})
                 if updated.modified_count > 0:
+                    if wait_msg:
+                        try: bot.delete_message(chat_id, wait_msg.message_id)
+                        except Exception: pass
                     return deliver_course_to_buyer(o_data, sms_text=sms_rec.get("raw_text"), is_manual=False)
 
             qr_img_bio, clean_amt = generate_upi_qr(amt_key, order_id)
-            inv = f"👤 <b>User:</b> {call.from_user.first_name}\n🆔 <b>Order:</b> <code>{order_id}</code>\n💰 <b>Amount:</b> ₹{clean_amt}\n⚠️ <b>Exact Amount Pay Karein.</b>\n⏳ <i>QR {QR_EXPIRY_SECONDS // 60} min mein expire hoga.</i>"
+            inv = f"👤 <b>User:</b> {call.from_user.first_name}\n🆔 <b>Order:</b> <code>{order_id}</code>\n💰 <b>Amount:</b> ₹{clean_amt}\n⚠️ <b>Please pay the exact amount shown.</b>\n⏳ <i>QR will expire in {QR_EXPIRY_SECONDS // 60} minutes.</i>"
             m = InlineKeyboardMarkup()
             if CHAT_LINK: m.row(InlineKeyboardButton("💬 Chat with Admin", url=CHAT_LINK))
             sent_msg = bot.send_photo(chat_id, photo=qr_img_bio, caption=inv, reply_markup=m, parse_mode="HTML")
             user_qr_messages[chat_id] = sent_msg.message_id
             orders_col.update_one({"order_id": order_id}, {"$set": {"qr_msg_id": sent_msg.message_id}})
+            
+            if wait_msg:
+                try: bot.delete_message(chat_id, wait_msg.message_id)
+                except Exception: pass
+                
             threading.Timer(QR_EXPIRY_SECONDS, expire_qr, args=(chat_id, sent_msg.message_id, course_id, amt_key, order_id)).start()
         return
 
@@ -1274,6 +1437,56 @@ def api_broadcast():
     threading.Thread(target=run_bc).start()
     return jsonify({"status": "success"})
 
+# --- NEW: SYSTEM SETTINGS API (MAINTENANCE & CHAT CLEAR) ---
+@app.route("/dashboard/api/system-settings", methods=["GET", "POST"])
+@require_auth
+def api_system_settings():
+    if request.method == "POST":
+        data = request.json
+        old_cfg = settings_col.find_one({"_id": "system_settings"}) or {}
+        was_maintenance = old_cfg.get("maintenance", False)
+        is_maintenance_now = data.get("maintenance", False)
+        
+        doc = {
+            "maintenance": is_maintenance_now,
+            "chat_cleanup_seconds": int(data.get("cleanup_seconds", 86400)),
+            "updated_at": get_ist_time()
+        }
+        settings_col.update_one({"_id": "system_settings"}, {"$set": doc}, upsert=True)
+
+        # Trigger Broadcast if Maintenance turned OFF
+        if was_maintenance and not is_maintenance_now:
+            def broadcast_back_online():
+                msg = "✅ <b>Bot is Back Online! / बोट चालू हो गया है!</b>\n\nMaintenance is complete. You can now continue using the bot smoothly.\n\n<i>मेंटेनेंस पूरा हो गया है, अब आप बोट का आराम से इस्तेमाल कर सकते हैं।</i>"
+                for u in users_col.find():
+                    if u["user_id"] != ADMIN_ID:
+                        try:
+                            orig_send_message(u["user_id"], msg, parse_mode="HTML")
+                            time.sleep(0.05) # MUST for anti-ban
+                        except: pass
+            threading.Thread(target=broadcast_back_online, daemon=True).start()
+
+        return jsonify({"status": "success"})
+    
+    cfg = settings_col.find_one({"_id": "system_settings"}) or {}
+    return jsonify({
+        "maintenance": cfg.get("maintenance", False),
+        "cleanup_seconds": cfg.get("chat_cleanup_seconds", 86400)
+    })
+
+@app.route("/dashboard/api/force-clear-chats", methods=["POST"])
+@require_auth
+def api_force_clear_chats():
+    def manual_clear_all():
+        with tracker_lock:
+            chats = list(user_chat_messages.keys())
+        for cid in chats:
+            clear_inactive_chat(cid)
+            time.sleep(0.1) # 0.1s delay to strictly avoid Telegram FloodWait (Ban)
+            
+    threading.Thread(target=manual_clear_all, daemon=True).start()
+    return jsonify({"status": "success", "message": "Chat clearing started safely in background."})
+
 @app.route("/dashboard/api/channel-logs")
 @require_auth
 def api_channel_logs():
@@ -1323,6 +1536,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .form-box{background:var(--surface); padding:15px; border-radius:6px; border:1px solid var(--line); margin-bottom:15px;}
   .form-box input, .form-box select, .form-box textarea{width:100%; padding:8px; margin:5px 0 10px; background:var(--bg); border:1px solid var(--line); color:var(--text); border-radius:4px;}
   .form-box button{background:var(--ok); color:var(--bg); border:none; padding:10px 15px; border-radius:4px; font-weight:bold; cursor:pointer;}
+  
+  /* Toggle Switch CSS */
+  .switch { position: relative; display: inline-block; width: 50px; height: 24px; vertical-align: middle; margin-left:10px;}
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: var(--line); transition: .4s; border-radius: 24px; }
+  .slider:before { position: absolute; content: ""; height: 16px; width: 16px; left: 4px; bottom: 4px; background-color: white; transition: .4s; border-radius: 50%; }
+  input:checked + .slider { background-color: var(--danger); }
+  input:checked + .slider:before { transform: translateX(26px); }
 </style></head><body>
 <header><h2>Store Dashboard</h2><div id="clock" class="mono"></div></header>
 <div class="ledger" id="overview"></div>
@@ -1334,6 +1555,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div class="tab" data-tab="broadcast">Broadcast</div>
   <div class="tab" data-tab="sms">SMS Pool</div>
   <div class="tab" data-tab="users">Users</div>
+  <div class="tab" data-tab="settings">⚙️ Settings</div>
 </div>
 <div class="subtabs" id="subtabs">
   <div class="subtab active" data-status="all">All</div>
@@ -1388,10 +1610,57 @@ async function load(){
   } else if(curTab==="sms"){
     r=await fetch("/dashboard/api/sms-pool"); let o=await r.json();
     document.getElementById("list").innerHTML = o.map(x=>`<div class="item pending"><div class="main"><div class="name">₹${x.amount}</div><div class="sub mono">${x.preview}</div></div><div><div class="sub">${x.created_at}</div></div></div>`).join("")||"No SMS.";
+  } else if(curTab==="settings") {
+    r=await fetch("/dashboard/api/system-settings"); let cfg=await r.json();
+    document.getElementById("list").innerHTML = `
+      <div class="form-box">
+        <h3>🛑 Maintenance Mode</h3>
+        <p style="font-size:12px; color:var(--muted);">Turn this ON to stop users from using the bot. They will see a 'Server Busy' message. Turn OFF to instantly broadcast to everyone that bot is back online safely.</p>
+        <div style="margin-bottom: 20px;">
+          <span style="font-weight:bold;">Maintenance Mode:</span>
+          <label class="switch">
+            <input type="checkbox" id="maint_toggle" ${cfg.maintenance ? 'checked' : ''} onchange="saveSettings()">
+            <span class="slider"></span>
+          </label>
+        </div>
+        <hr style="border-color:var(--line); margin: 20px 0;">
+        
+        <h3>🧹 Auto Chat-Delete (Anti-Ban Safe)</h3>
+        <p style="font-size:12px; color:var(--muted);">Set how long the bot keeps old promo/QR messages before auto-deleting them. Faster delete keeps the chat cleaner.</p>
+        <label>Auto-Clear Timer:</label>
+        <select id="cleanup_time" onchange="saveSettings()">
+            <option value="3600" ${cfg.cleanup_seconds==3600?'selected':''}>1 Hour</option>
+            <option value="43200" ${cfg.cleanup_seconds==43200?'selected':''}>12 Hours</option>
+            <option value="86400" ${cfg.cleanup_seconds==86400?'selected':''}>24 Hours</option>
+            <option value="172800" ${cfg.cleanup_seconds==172800?'selected':''}>48 Hours</option>
+        </select>
+        
+        <hr style="border-color:var(--line); margin: 20px 0;">
+        <h3>⚠️ Force Clear All Chats Now</h3>
+        <p style="font-size:12px; color:var(--muted);">Clicking this will slowly and safely delete all active tracked messages across all users right now. This happens in the background to prevent Telegram bans.</p>
+        <button style="background-color:var(--danger);" onclick="forceClearChats()">🧹 Clear All Chats (Safe Mode)</button>
+      </div>
+    `;
   } else {
     r=await fetch("/dashboard/api/users"); let o=await r.json();
     document.getElementById("list").innerHTML = o.map(x=>`<div class="item ok"><div class="main"><div class="name">ID: <span class="mono">${x.user_id}</span></div><div class="sub">Active: ${x.updated_at}</div></div></div>`).join("")||"No users.";
   }
+}
+async function saveSettings(){
+    let m = document.getElementById("maint_toggle").checked;
+    let c = document.getElementById("cleanup_time").value;
+    await fetch("/dashboard/api/system-settings", {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({maintenance: m, cleanup_seconds: c})
+    });
+    alert("Settings Saved!");
+}
+async function forceClearChats(){
+    if(confirm("Are you sure? This will delete bot messages from all user chats safely in the background.")){
+        let res = await fetch("/dashboard/api/force-clear-chats", {method: "POST"});
+        let data = await res.json();
+        alert(data.message);
+    }
 }
 async function appr(id){ if(confirm("Approve order manually?")){ await fetch("/dashboard/api/orders/"+id+"/approve",{method:"POST"}); load(); } }
 async function delC(id){ if(confirm("Delete course?")){ await fetch("/dashboard/api/courses/"+id,{method:"DELETE"}); load(); } }
@@ -1441,7 +1710,7 @@ def dashboard_page(): return DASHBOARD_HTML
 def global_sms_checker():
     while True:
         try:
-            time.sleep(10) # 10 सेकंड में एक बार डेटाबेस से चेक करेगा
+            time.sleep(10)
             pending_orders_list = list(orders_col.find({"status": "PENDING"}))
             for order in pending_orders_list:
                 amt_key = order.get("amount")
@@ -1450,18 +1719,16 @@ def global_sms_checker():
                     updated = sms_pool_col.update_one({"_id": sms_rec["_id"], "status": "UNUSED"}, {"$set": {"status": "PROCESSED"}})
                     if updated.modified_count > 0:
                         deliver_course_to_buyer(order, sms_text=sms_rec.get("raw_text"), is_manual=False)
-        except Exception as e:
+        except Exception:
             pass
 
 def global_memory_cleanup():
     while True:
         try:
-            time.sleep(3600) # हर 1 घंटे में मेमोरी क्लीन करेगा
+            time.sleep(3600)
             now = time.time()
-            # Clear old orders cache
             keys_to_del = [oid for oid, o in all_orders_cache.items() if now - o.get("created_at", 0) > 86400]
             for k in keys_to_del: all_orders_cache.pop(k, None)
-            # Clear old cooldown limits
             cool_keys = [uid for uid, t in user_cooldowns.items() if now - t > 3600]
             for k in cool_keys: user_cooldowns.pop(k, None)
         except Exception: pass
