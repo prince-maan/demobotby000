@@ -992,6 +992,8 @@ def handle_all_messages(message):
                     elif b_url.startswith("http"): m.row(InlineKeyboardButton(b["text"], url=b_url))
                     else: m.row(InlineKeyboardButton(b["text"], callback_data=b_url))
                 
+                if not m.keyboard: m = None
+                
                 bot.send_message(ADMIN_ID, "⏳ Broadcasting started...")
                 
                 def run_bc():
@@ -1000,7 +1002,14 @@ def handle_all_messages(message):
                     for u in users_col.find():
                         uid = u["user_id"]
                         try:
-                            if not m_items: continue
+                            if not m_items:
+                                if len(btns) > 0:
+                                    msg = orig_send_message(uid, "👇", reply_markup=m, parse_mode="HTML", disable_web_page_preview=True)
+                                    register_activity(uid, msg.message_id, "broadcast")
+                                    if hrs > 0: delete_list.append((uid, msg.message_id))
+                                    success += 1
+                                continue
+
                             sent_ids = []
                             if len(m_items) == 1:
                                 it = m_items[0]
@@ -1125,7 +1134,7 @@ def handle_buttons(call):
         cfg = settings_col.find_one({"_id": "intl_btn_cfg"})
         if not cfg:
             if INTERNATIONAL_LINK:
-                return bot.send_message(chat_id, f"🌍 <b>International Payment:</b>\n{INTERNATIONAL_LINK}", parse_mode="HTML", msg_type="general")
+                return bot.send_message(chat_id, f"🌍 <b>International Payment:</b>\n{INTERNATIONAL_LINK}", parse_mode="HTML", msg_type="general", disable_web_page_preview=True)
             return bot.send_message(chat_id, "ℹ️ No details available.", parse_mode="HTML", msg_type="general")
         
         markup = InlineKeyboardMarkup()
@@ -1135,12 +1144,13 @@ def handle_buttons(call):
             elif b_url.startswith("http"): markup.row(InlineKeyboardButton(b["text"], url=b_url))
             else: markup.row(InlineKeyboardButton(b["text"], callback_data=b_url))
         
+        if not markup.keyboard: markup = None
         photo_id = cfg.get("photo_id")
         text = cfg.get("text", "")
         if photo_id:
-            bot.send_photo(chat_id, photo_id, caption=text, reply_markup=markup if markup.keyboard else None, parse_mode="HTML", msg_type="general")
+            bot.send_photo(chat_id, photo_id, caption=text, reply_markup=markup, parse_mode="HTML", msg_type="general")
         else:
-            bot.send_message(chat_id, text or "🌍 <b>International Payment Details</b>", reply_markup=markup if markup.keyboard else None, parse_mode="HTML", msg_type="general")
+            bot.send_message(chat_id, text or "🌍 <b>International Payment Details</b>", reply_markup=markup, parse_mode="HTML", msg_type="general", disable_web_page_preview=True)
         return
 
     if data == "admin_custom_intl":
@@ -1179,7 +1189,7 @@ def handle_buttons(call):
         plans = settings_col.find_one({"_id": "store_plans"})
         c_ids = plans.get("course_ids", []) if plans else [c["course_id"] for c in courses_col.find().limit(10)]
         if not c_ids: return bot.send_message(chat_id, "ℹ️ No plans available.", parse_mode="HTML", msg_type="general")
-        bot.send_message(chat_id, "📚 <b>Available Plans:</b>", parse_mode="HTML", msg_type="general")
+        bot.send_message(chat_id, "📚 <b>Available Plans:</b>", parse_mode="HTML", msg_type="general", disable_web_page_preview=True)
         for cid in c_ids:
             c = courses_col.find_one({"course_id": cid})
             if c: send_course_to_user(chat_id, c)
@@ -1710,6 +1720,35 @@ def api_force_clear_chats():
     threading.Thread(target=manual_clear_all, daemon=True).start()
     return jsonify({"status": "success", "message": "Chat clearing started safely in background."})
 
+@app.route("/dashboard/api/broadcast", methods=["POST"])
+@require_auth
+def api_broadcast():
+    msg = request.json.get("message")
+    btns = request.json.get("buttons", [])
+    if not msg: return jsonify({"error": "Empty message"}), 400
+    
+    markup = telebot.types.InlineKeyboardMarkup()
+    for b in btns:
+        if b.get("text") and b.get("url"):
+            b_url = b["url"]
+            if b_url.lower() == "close":
+                markup.add(telebot.types.InlineKeyboardButton(b["text"], callback_data="close_msg"))
+            elif b_url.startswith("http"):
+                markup.add(telebot.types.InlineKeyboardButton(b["text"], url=b_url))
+            else:
+                markup.add(telebot.types.InlineKeyboardButton(b["text"], callback_data=b_url))
+                
+    if not markup.keyboard: markup = None
+    
+    def run_bc():
+        for u in users_col.find():
+            try: 
+                bot.send_message(u["user_id"], msg, reply_markup=markup, parse_mode="HTML", disable_web_page_preview=True)
+                time.sleep(0.05)
+            except Exception: pass
+    threading.Thread(target=run_bc).start()
+    return jsonify({"status": "success"})
+
 @app.route("/dashboard/api/channel-logs")
 @require_auth
 def api_channel_logs():
@@ -1775,6 +1814,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div class="tab" data-tab="courses">Courses</div>
   <div class="tab" data-tab="offers">Offers</div>
   <div class="tab" data-tab="logs">Channel Logs</div>
+  <div class="tab" data-tab="broadcast">Broadcast</div>
   <div class="tab" data-tab="sms">SMS Pool</div>
   <div class="tab" data-tab="users">Users</div>
   <div class="tab" data-tab="settings">⚙️ Settings</div>
@@ -1819,6 +1859,13 @@ async function load(){
       <button onclick="createOffer()">Create Offer</button></div>`;
     let listHTML = o.map(x=>`<div class="item ${x.status==='Active'?'ok':'expired'}"><div class="main"><div class="name">${x.discount}% OFF - <span class="mono">${x.offer_code}</span></div><div class="sub">🔗 Link: <a href="${x.link}" target="_blank" style="color:#3ED9A0">${x.link}</a></div><div class="sub">Target: ${x.target} ${x.course?'('+x.course+')':''} | Used: ${x.used}/${x.max==-1?'∞':x.max} | Per User: ${x.per_user==-1?'∞':x.per_user+'x'} | Exp: ${x.expires}</div></div><div><button class="action-btn danger-btn" onclick="delOffer('${x.offer_code}')">🗑</button></div></div>`).join("");
     document.getElementById("list").innerHTML = formHTML + (listHTML||"No offers.");
+  } else if(curTab==="broadcast"){
+    document.getElementById("list").innerHTML = `<div class="form-box"><h3>Broadcast Message</h3>
+      <p style="font-size:12px; color:var(--muted)">Use HTML tags: &lt;b&gt;<b>Bold</b>&lt;/b&gt;, &lt;i&gt;<i>Italic</i>&lt;/i&gt;</p>
+      <textarea id="bc_msg" rows="5" placeholder="Type your message here..."></textarea>
+      <p style="font-size:12px; color:var(--muted); margin-top:10px;">Buttons (Optional) - Format: <b>Name - Link</b> (One per line)<br><i>Type <b>Close - close</b> to add a close button.</i></p>
+      <textarea id="bc_btns" rows="3" placeholder="My Youtube - https://youtube.com\\nClose - close"></textarea>
+      <button onclick="sendBc()">🚀 Send to All Users</button></div>`;
   } else if(curTab==="logs"){
     r=await fetch("/dashboard/api/channel-logs"); let o=await r.json();
     document.getElementById("list").innerHTML = o.map(x=>`<div class="item ${x.status==='APPROVED'?'ok':'expired'}"><div class="main"><div class="name">${x.first_name} (@${x.username}) - <span class="mono">${x.user_id}</span></div><div class="sub">📺 Channel: <b style="color:var(--text)">${x.channel_name}</b></div><div class="sub">Pack: ${x.course} · ${x.date}</div></div><div style="font-weight:bold; color:var(--${x.status==='APPROVED'?'ok':'danger'})">${x.status}</div></div>`).join("")||"No logs yet.";
@@ -1908,6 +1955,25 @@ async function forceClearChats(){
         let data = await res.json();
         alert(data.message);
     }
+}
+
+async function sendBc(){
+  let msg = document.getElementById('bc_msg').value;
+  let btnRaw = document.getElementById('bc_btns').value;
+  if(!msg) return alert("Message is empty!");
+  let btns = [];
+  if(btnRaw){
+     for(let l of btnRaw.split("\\n")){
+        if(l.includes("-")){
+           let pts = l.split("-");
+           btns.push({text: pts[0].trim(), url: pts.slice(1).join("-").trim()});
+        }
+     }
+  }
+  if(confirm("Send this broadcast to ALL users?")){
+    await fetch("/dashboard/api/broadcast", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({message: msg, buttons: btns})});
+    alert("Broadcast started in background!"); document.getElementById('bc_msg').value=""; document.getElementById('bc_btns').value="";
+  }
 }
 
 async function appr(id){ if(confirm("Approve order manually?")){ await fetch("/dashboard/api/orders/"+id+"/approve",{method:"POST"}); load(); } }
