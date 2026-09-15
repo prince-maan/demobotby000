@@ -92,23 +92,19 @@ except Exception as e:
     print(f"❌ MongoDB Error: {e}")
     sys.exit(1)
 
-
 # ==========================================
-# 🚀 SMART CACHE SYSTEM (SPEED OPTIMIZATION)
+# 🚀 SMART CACHE SYSTEM (0-DELAY SPEED FIX)
 # ==========================================
 db_cache = {}
 cache_lock = threading.Lock()
 
 def get_cached_setting(key, ttl=15):
-    """Caches DB settings in RAM for 15 seconds to eliminate query lag"""
     now = time.time()
     with cache_lock:
         if key in db_cache and now - db_cache[key]['time'] < ttl:
             return db_cache[key]['data']
-    
     val = settings_col.find_one({"_id": key})
-    with cache_lock:
-        db_cache[key] = {'data': val, 'time': now}
+    with cache_lock: db_cache[key] = {'data': val, 'time': now}
     return val
 
 def get_cached_course(course_id, ttl=30):
@@ -117,16 +113,32 @@ def get_cached_course(course_id, ttl=30):
     with cache_lock:
         if cache_key in db_cache and now - db_cache[cache_key]['time'] < ttl:
             return db_cache[cache_key]['data']
-            
     val = courses_col.find_one({"course_id": course_id})
+    with cache_lock: db_cache[cache_key] = {'data': val, 'time': now}
+    return val
+
+def get_cached_user(user_id, ttl=5):
+    cache_key = f"user_{user_id}"
+    now = time.time()
     with cache_lock:
-        db_cache[cache_key] = {'data': val, 'time': now}
+        if cache_key in db_cache and now - db_cache[cache_key]['time'] < ttl:
+            return db_cache[cache_key]['data']
+    val = users_col.find_one({"user_id": user_id})
+    with cache_lock: db_cache[cache_key] = {'data': val, 'time': now}
+    return val
+
+def get_cached_offer(offer_code, ttl=15):
+    cache_key = f"offer_{offer_code}"
+    now = time.time()
+    with cache_lock:
+        if cache_key in db_cache and now - db_cache[cache_key]['time'] < ttl:
+            return db_cache[cache_key]['data']
+    val = offers_col.find_one({"offer_code": offer_code})
+    with cache_lock: db_cache[cache_key] = {'data': val, 'time': now}
     return val
 
 def invalidate_cache(key):
-    with cache_lock:
-        db_cache.pop(key, None)
-
+    with cache_lock: db_cache.pop(key, None)
 
 # ==========================================
 # ⚙️ MAINTENANCE & AUTO-CLEAR SETTINGS
@@ -169,18 +181,12 @@ def clear_inactive_chat(chat_id, is_force=False, force_del_promos=True, force_de
         for m in msgs:
             m_type = m.get("type", "general")
             delete_it = False
-            
-            if m_type in ["course", "menu", "general"] and del_promos:
-                delete_it = True
-            elif m_type == "broadcast" and del_broadcasts:
-                delete_it = True
-            elif m_type == "purchase" and del_purchases:
-                delete_it = True
+            if m_type in ["course", "menu", "general"] and del_promos: delete_it = True
+            elif m_type == "broadcast" and del_broadcasts: delete_it = True
+            elif m_type == "purchase" and del_purchases: delete_it = True
 
-            if delete_it:
-                to_delete.append(m["id"])
-            else:
-                to_keep.append(m)
+            if delete_it: to_delete.append(m["id"])
+            else: to_keep.append(m)
 
         user_chat_messages[chat_id] = to_keep
         if not is_force:
@@ -203,9 +209,7 @@ def register_activity(chat_id, message_id=None, msg_type="general"):
         
         cfg = get_cleanup_settings()
         cleanup_time = cfg["seconds"]
-
         if chat_id in user_inactivity_timers: user_inactivity_timers[chat_id].cancel()
-        
         if cleanup_time > 0: 
             new_timer = threading.Timer(cleanup_time, clear_inactive_chat, args=(chat_id, False))
             user_inactivity_timers[chat_id] = new_timer
@@ -287,7 +291,7 @@ admin_data, user_states, user_qr_messages, pending_orders, all_orders_cache = {}
 user_cooldowns = {}
 pending_lock = threading.Lock()
 
-def check_rate_limit(user_id, cooldown=1):
+def check_rate_limit(user_id, cooldown=1.2):
     now = time.time()
     if user_id in user_cooldowns and now - user_cooldowns[user_id] < cooldown: return False
     user_cooldowns[user_id] = now
@@ -295,14 +299,14 @@ def check_rate_limit(user_id, cooldown=1):
 
 def set_user_state(user_id, step, order_id=None, amount_key=None):
     user_states[user_id] = {"step": step, "order_id": order_id, "amount_key": amount_key}
-    def _bg_state():
+    def _bg():
         try: users_col.update_one({"user_id": user_id}, {"$set": {"bot_state": step, "bot_state_order": order_id, "bot_state_amt": amount_key}}, upsert=True)
         except: pass
-    threading.Thread(target=_bg_state, daemon=True).start()
+    threading.Thread(target=_bg, daemon=True).start()
 
 def get_user_state(user_id):
     if user_id in user_states: return user_states[user_id]
-    u = users_col.find_one({"user_id": user_id})
+    u = get_cached_user(user_id)
     if u and u.get("bot_state"):
         st = {"step": u.get("bot_state"), "order_id": u.get("bot_state_order"), "amount_key": u.get("bot_state_amt")}
         user_states[user_id] = st
@@ -311,10 +315,10 @@ def get_user_state(user_id):
 
 def clear_user_state(user_id):
     user_states.pop(user_id, None)
-    def _bg_clear():
+    def _bg():
         try: users_col.update_one({"user_id": user_id}, {"$unset": {"bot_state": "", "bot_state_order": "", "bot_state_amt": ""}})
         except: pass
-    threading.Thread(target=_bg_clear, daemon=True).start()
+    threading.Thread(target=_bg, daemon=True).start()
 
 def generate_unique_amount(base_amount):
     base_clean = round(float(base_amount))
@@ -345,7 +349,9 @@ def check_offer_validity(offer, user_id, course_id=None):
 
 def clear_user_offer(user_id, offer_code):
     def _bg():
-        try: users_col.update_one({"user_id": user_id}, {"$unset": {"active_offer_code": "", "active_offer": ""}})
+        try:
+            users_col.update_one({"user_id": user_id}, {"$unset": {"active_offer_code": "", "active_offer": ""}})
+            invalidate_cache(f"user_{user_id}")
         except: pass
     threading.Thread(target=_bg, daemon=True).start()
 
@@ -364,19 +370,17 @@ def calculate_final_price(user_id, course_id, base_amount):
             
             if allowed:
                 pct = flash_sale["percent"]
-                if flash_sale["mode"] == "hike":
-                    final_price = final_price * (1 + pct / 100.0)
-                else:
-                    final_price = final_price * (1 - pct / 100.0)
+                if flash_sale["mode"] == "hike": final_price = final_price * (1 + pct / 100.0)
+                else: final_price = final_price * (1 - pct / 100.0)
                 final_price = round(final_price, 2)
                 applied_flash_id = flash_sale["sale_id"]
 
-    u_rec = users_col.find_one({"user_id": user_id}) or {}
+    u_rec = get_cached_user(user_id) or {}
     active_off_code = u_rec.get("active_offer_code") or (u_rec.get("active_offer") or {}).get("offer_code")
     applied_promo_code, promo_disc_pct = None, None
     
     if active_off_code:
-        live_offer = offers_col.find_one({"offer_code": active_off_code})
+        live_offer = get_cached_offer(active_off_code)
         is_valid, _ = check_offer_validity(live_offer, user_id, course_id)
         if is_valid:
             promo_disc_pct = live_offer["discount_percent"]
@@ -447,7 +451,7 @@ def expire_qr(chat_id, message_id, course_id, amount_key, order_id):
 
 def deliver_course_to_buyer(order, sms_text=None, is_manual=False):
     order_id, chat_id, user_id, course_id = order["order_id"], order["chat_id"], order["user_id"], order["course_id"]
-    course = get_cached_course(course_id)
+    course = get_cached_course(course_id) or {}
     new_status = "COMPLETED_MANUAL" if is_manual else "COMPLETED_AUTO"
     
     res = orders_col.update_one({"order_id": order_id, "status": {"$in": ["PENDING", "EXPIRED"]}}, {"$set": {"status": new_status, "delivered_at": get_ist_time(), "delivered_at_ts": time.time()}})
@@ -474,7 +478,7 @@ def deliver_course_to_buyer(order, sms_text=None, is_manual=False):
     extra_txt = succ_cfg.get("text", "").strip()
     succ_btns = succ_cfg.get("buttons", [])
 
-    final_text = f"🎉 <b>Payment Verified Successfully!</b>\n\n{course['secret_text']}"
+    final_text = f"🎉 <b>Payment Verified Successfully!</b>\n\n{course.get('secret_text','')}"
     if extra_txt:
         final_text += f"\n\n{extra_txt}"
 
@@ -541,19 +545,17 @@ def handle_join_request(message):
     if purchase:
         try: 
             bot.approve_chat_join_request(chat_id, user_id)
-            channel_logs_col.insert_one({
-                "user_id": user_id, "first_name": u_first_name, "username": u_username,
-                "course_id": course_id, "channel_name": channel_name, "status": "APPROVED", "date": now_str
-            })
+            def _bg_log_ap():
+                channel_logs_col.insert_one({"user_id": user_id, "first_name": u_first_name, "username": u_username, "course_id": course_id, "channel_name": channel_name, "status": "APPROVED", "date": now_str})
+            threading.Thread(target=_bg_log_ap, daemon=True).start()
             orig_send_message(user_id, f"✅ <b>Request Approved!</b>\nWelcome to <b>{channel_name}</b>.", parse_mode="HTML")
         except Exception: pass
     else:
         try:
             bot.decline_chat_join_request(chat_id, user_id)
-            channel_logs_col.insert_one({
-                "user_id": user_id, "first_name": u_first_name, "username": u_username,
-                "course_id": course_id, "channel_name": channel_name, "status": "DENIED", "date": now_str
-            })
+            def _bg_log_dn():
+                channel_logs_col.insert_one({"user_id": user_id, "first_name": u_first_name, "username": u_username, "course_id": course_id, "channel_name": channel_name, "status": "DENIED", "date": now_str})
+            threading.Thread(target=_bg_log_dn, daemon=True).start()
             orig_send_message(user_id, f"❌ <b>Access Denied!</b>\nYou haven't purchased this pack yet. Please buy it from the bot first.", parse_mode="HTML")
             log_msg = f"🚫 <b>[JOIN DENIED - NO PAYMENT]</b>\n\n👤 <b>User:</b> {u_men} (<code>{user_id}</code>)\n📺 <b>Channel:</b> {channel_name}\n⏰ <b>Time:</b> {now_str}"
             orig_send_message(DB_CHANNEL_ID, log_msg, parse_mode="HTML")
@@ -574,10 +576,8 @@ def send_course_to_user(chat_id, course):
     final_price, applied_flash_id, applied_promo_code, promo_disc_pct, flash_sale = calculate_final_price(chat_id, course["course_id"], base_price)
 
     btn_text = f"🇮🇳 UPI (Pay ₹{int(final_price) if final_price.is_integer() else final_price})"
-    if applied_promo_code:
-        btn_text = f"🎉 Offer Applied (Pay ₹{int(final_price) if final_price.is_integer() else final_price})"
-    elif applied_flash_id and flash_sale and flash_sale.get("mode") == "drop":
-        btn_text = f"⚡ Flash Sale (Pay ₹{int(final_price) if final_price.is_integer() else final_price})"
+    if applied_promo_code: btn_text = f"🎉 Offer Applied (Pay ₹{int(final_price) if final_price.is_integer() else final_price})"
+    elif applied_flash_id and flash_sale and flash_sale.get("mode") == "drop": btn_text = f"⚡ Flash Sale (Pay ₹{int(final_price) if final_price.is_integer() else final_price})"
 
     markup = InlineKeyboardMarkup()
     markup.row(InlineKeyboardButton(btn_text, callback_data=f"pay_upi_{course['course_id']}"))
@@ -680,15 +680,13 @@ def send_admin_panel(chat_id):
 @bot.message_handler(commands=["start"])
 def start_command(message):
     user_id = message.chat.id
-    
     if is_maintenance_mode() and user_id != ADMIN_ID:
         orig_send_message(user_id, "⚠️ <b>Bot is currently under maintenance. / अभी बोट मेंटेनेंस पर है।</b>\n\nServers are busy or undergoing updates. Please try again after some time.\n<i>सर्वर बिजी हैं, कृपया कुछ समय बाद प्रयास करें।</i>", parse_mode="HTML")
         return
-
     if not check_rate_limit(user_id, 1): return
     register_activity(user_id, message.message_id, "general")
     
-    # ⚡ FAST BACKGROUND DB WRITE
+    # Fast Background Write
     def _bg_start():
         try: users_col.update_one({"user_id": user_id}, {"$set": {"user_id": user_id, "updated_at": get_ist_time()}}, upsert=True)
         except: pass
@@ -697,7 +695,7 @@ def start_command(message):
     param = message.text.split()[1].strip() if len(message.text.split()) > 1 else ""
 
     if param.startswith("off_"):
-        offer = offers_col.find_one({"offer_code": param})
+        offer = get_cached_offer(param)
         if not offer:
             bot.send_message(user_id, "❌ <b>This offer is invalid or has expired.</b>", parse_mode="HTML", msg_type="general")
             return send_custom_start_menu(user_id)
@@ -712,7 +710,14 @@ def start_command(message):
         if per_user_limit != -1 and get_offer_usage_count(user_id, offer["offer_code"]) >= per_user_limit:
             bot.send_message(user_id, "⚠️ <b>You have already used this offer once.</b>\nIt cannot be claimed again.", parse_mode="HTML", msg_type="general")
             return send_custom_start_menu(user_id)
-        users_col.update_one({"user_id": user_id}, {"$set": {"active_offer_code": offer["offer_code"]}, "$unset": {"active_offer": ""}}, upsert=True)
+        
+        def _bg_off():
+            try:
+                users_col.update_one({"user_id": user_id}, {"$set": {"active_offer_code": offer["offer_code"]}, "$unset": {"active_offer": ""}}, upsert=True)
+                invalidate_cache(f"user_{user_id}")
+            except: pass
+        threading.Thread(target=_bg_off, daemon=True).start()
+        
         bot.send_message(user_id, f"🎉 <b>Congrats! {offer['discount_percent']}% discount activated!</b>", parse_mode="HTML", msg_type="general")
         if offer["target_type"] == "single":
             c = get_cached_course(offer["target_course_id"])
@@ -765,11 +770,9 @@ def start_command(message):
 @bot.message_handler(content_types=["photo", "video", "document", "text"])
 def handle_all_messages(message):
     user_id = message.chat.id
-    
     if is_maintenance_mode() and user_id != ADMIN_ID:
         orig_send_message(user_id, "⚠️ <b>Bot is currently under maintenance. / अभी बोट मेंटेनेंस पर है।</b>\n\nServers are busy or undergoing updates. Please try again after some time.\n<i>सर्वर बिजी हैं, कृपया कुछ समय बाद प्रयास करें।</i>", parse_mode="HTML")
         return
-
     if not check_rate_limit(user_id, 1): return
     register_activity(user_id, message.message_id, "general")
 
@@ -1191,38 +1194,45 @@ def handle_buttons(call):
     msg_id = call.message.message_id
     data = call.data
 
-    # 1. Close Button Handler (Instantly processed)
+    # 1. ALWAYS ALLOW CLOSE MSG (Even in rate limit or maintenance)
     if data == "close_msg":
         try: bot.delete_message(chat_id, msg_id)
         except Exception: pass
         try: bot.answer_callback_query(call.id)
         except Exception: pass
         return
-    
-    # 2. Maintenance Mode
+
+    # 2. MAINTENANCE CHECK
     if is_maintenance_mode() and chat_id != ADMIN_ID:
         try: bot.answer_callback_query(call.id, "⚠️ Bot is currently under maintenance. Please try again later.", show_alert=True)
         except Exception: pass
         return
 
-    # 3. Rate Limiter
-    if not check_rate_limit(chat_id, 1.5): 
+    # 3. RATE LIMITER
+    if not check_rate_limit(chat_id, 1.2): 
         try: bot.answer_callback_query(call.id, "⚠️ Please slow down! Don't click too fast.", show_alert=False)
         except Exception: pass
         return
 
-    # 4. INSTANT SIGNAL FIX: Immediately answer callback so Telegram knows button was clicked
-    try: bot.answer_callback_query(call.id)
-    except Exception: pass
-        
+    # 🚀 4. ZERO-DELAY FIX: Answer Callback Query IMMEDIATELY in a Background Thread
+    def bg_answer(text=None, alert=False):
+        try: bot.answer_callback_query(call.id, text=text, show_alert=alert)
+        except Exception: pass
+    
     register_activity(chat_id, msg_id, "general")
 
-    # 5. Handle Buttons
+    # CUSTOM NOTIFICATIONS (Handled here so they show alerts)
     if data.startswith("paydone_"):
         oid = data.replace("paydone_", "")
         order = all_orders_cache.get(oid) or orders_col.find_one({"order_id": oid})
-        if not order: return
-        if order.get("status") in ("COMPLETED_AUTO", "COMPLETED_MANUAL"): return
+        if not order:
+            threading.Thread(target=bg_answer, args=("❌ Order not found.", True), daemon=True).start()
+            return
+        if order.get("status") in ("COMPLETED_AUTO", "COMPLETED_MANUAL"):
+            threading.Thread(target=bg_answer, args=("✅ Already delivered.", True), daemon=True).start()
+            return
+        
+        threading.Thread(target=bg_answer, args=("⏳ Checking...", False), daemon=True).start()
         
         amt_key = order.get("amount")
         sms_rec = sms_pool_col.find_one({"amount": amt_key, "status": "UNUSED"})
@@ -1243,6 +1253,7 @@ def handle_buttons(call):
         return
 
     if data.startswith("send_ss_"):
+        threading.Thread(target=bg_answer, daemon=True).start()
         set_user_state(chat_id, "WAITING_PAYMENT_SS", data.replace("send_ss_", ""))
         bot.send_message(chat_id, "📸 <b>Please send your payment screenshot.</b>", parse_mode="HTML", msg_type="general")
         return
@@ -1250,12 +1261,17 @@ def handle_buttons(call):
     if data.startswith("man_appr_"):
         oid = data.replace("man_appr_", "")
         o = all_orders_cache.get(oid) or orders_col.find_one({"order_id": oid})
-        if not o: return
+        if not o:
+            threading.Thread(target=bg_answer, args=("❌ Order not found.", True), daemon=True).start()
+            return
         if o.get("status") in ("COMPLETED_AUTO", "COMPLETED_MANUAL"):
+            threading.Thread(target=bg_answer, args=("ℹ️ Already delivered via SMS.", True), daemon=True).start()
             try: bot.edit_message_reply_markup(chat_id, msg_id, reply_markup=None)
             except Exception: pass
             return
+        
         deliver_course_to_buyer(o, sms_text="Manual Approval", is_manual=True)
+        threading.Thread(target=bg_answer, args=("✅ Approved!", True), daemon=True).start()
         try:
             bot.edit_message_reply_markup(chat_id, msg_id, reply_markup=None)
             orig_send_message(chat_id, f"✅ <b>ORDER {oid} APPROVED</b>\n⏰ {get_ist_time()}", reply_to_message_id=msg_id, parse_mode="HTML")
@@ -1265,14 +1281,20 @@ def handle_buttons(call):
     if data.startswith("man_deny_"):
         oid = data.replace("man_deny_", "")
         o = all_orders_cache.get(oid) or orders_col.find_one({"order_id": oid})
-        if not o: return
+        if not o:
+            threading.Thread(target=bg_answer, args=("❌ Not found.", True), daemon=True).start()
+            return
         if o.get("status") in ("COMPLETED_AUTO", "COMPLETED_MANUAL"):
+            threading.Thread(target=bg_answer, args=("ℹ️ Already delivered.", True), daemon=True).start()
             try: bot.edit_message_reply_markup(chat_id, msg_id, reply_markup=None)
             except Exception: pass
             return
+            
         m = InlineKeyboardMarkup().row(InlineKeyboardButton("💬 Contact Admin", url=CHAT_LINK)) if CHAT_LINK else None
         try: bot.send_message(o["chat_id"], f"❌ <b>Payment Failed!</b>\nOrder <code>{oid}</code> rejected.", reply_markup=m, parse_mode="HTML", msg_type="general")
         except Exception: pass
+        
+        threading.Thread(target=bg_answer, args=("❌ Rejected.", True), daemon=True).start()
         try:
             bot.edit_message_reply_markup(chat_id, msg_id, reply_markup=None)
             orig_send_message(chat_id, f"❌ <b>ORDER {oid} REJECTED</b>", reply_to_message_id=msg_id, parse_mode="HTML")
@@ -1280,6 +1302,7 @@ def handle_buttons(call):
         return
 
     if data.startswith("pay_upi_"):
+        threading.Thread(target=bg_answer, args=("⏳ Please wait...", False), daemon=True).start()
         course_id = data.replace("pay_upi_", "")
         course = get_cached_course(course_id)
         if course:
@@ -1369,6 +1392,9 @@ def handle_buttons(call):
                 
             threading.Timer(QR_EXPIRY_SECONDS, expire_qr, args=(chat_id, sent_msg.message_id, course_id, amt_key, order_id)).start()
         return
+
+    # FOR ALL OTHER BUTTONS: INSTANT BACKGROUND ACKNOWLEDGEMENT
+    threading.Thread(target=bg_answer, daemon=True).start()
 
     # ADMIN PANEL HANDLERS
     if data == "admin_flash_price":
@@ -1824,14 +1850,12 @@ def api_system_settings():
 @require_auth
 def api_force_clear_chats():
     data = request.json or {}
-    
     del_promos = data.get("del_promos", True)
     del_broadcasts = data.get("del_broadcasts", True)
     del_purchases = data.get("del_purchases", False)
 
     def manual_clear_all():
-        with tracker_lock:
-            chats = list(user_chat_messages.keys())
+        with tracker_lock: chats = list(user_chat_messages.keys())
         for cid in chats:
             clear_inactive_chat(cid, is_force=True, force_del_promos=del_promos, force_del_broadcasts=del_broadcasts, force_del_purchases=del_purchases)
             time.sleep(0.1)
@@ -1850,12 +1874,9 @@ def api_broadcast():
     for b in btns:
         if b.get("text") and b.get("url"):
             b_url = b["url"]
-            if b_url.lower() == "close":
-                markup.add(telebot.types.InlineKeyboardButton(b["text"], callback_data="close_msg"))
-            elif b_url.startswith("http"):
-                markup.add(telebot.types.InlineKeyboardButton(b["text"], url=b_url))
-            else:
-                markup.add(telebot.types.InlineKeyboardButton(b["text"], callback_data=b_url))
+            if b_url.lower() == "close": markup.add(telebot.types.InlineKeyboardButton(b["text"], callback_data="close_msg"))
+            elif b_url.startswith("http"): markup.add(telebot.types.InlineKeyboardButton(b["text"], url=b_url))
+            else: markup.add(telebot.types.InlineKeyboardButton(b["text"], callback_data=b_url))
                 
     if not markup.keyboard: markup = None
     
@@ -1917,7 +1938,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .form-box{background:var(--surface); padding:15px; border-radius:6px; border:1px solid var(--line); margin-bottom:15px;}
   .form-box input, .form-box select, .form-box textarea{width:100%; padding:8px; margin:5px 0 10px; background:var(--bg); border:1px solid var(--line); color:var(--text); border-radius:4px;}
   .form-box button{background:var(--ok); color:var(--bg); border:none; padding:10px 15px; border-radius:4px; font-weight:bold; cursor:pointer;}
-  
   .switch { position: relative; display: inline-block; width: 50px; height: 24px; vertical-align: middle; margin-left:10px;}
   .switch input { opacity: 0; width: 0; height: 0; }
   .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: var(--line); transition: .4s; border-radius: 24px; }
@@ -2042,7 +2062,6 @@ async function load(){
 async function saveSettings(){
     let m = document.getElementById("maint_toggle").checked;
     let c = document.getElementById("cleanup_time").value;
-    
     let auto_dp = document.getElementById("auto_del_promos").checked;
     let auto_db = document.getElementById("auto_del_broadcasts").checked;
     let auto_dpu = document.getElementById("auto_del_purchases").checked;
@@ -2050,11 +2069,8 @@ async function saveSettings(){
     await fetch("/dashboard/api/system-settings", {
         method: "POST", headers: {"Content-Type": "application/json"},
         body: JSON.stringify({
-            maintenance: m, 
-            cleanup_seconds: c, 
-            auto_del_promos: auto_dp, 
-            auto_del_broadcasts: auto_db,
-            auto_del_purchases: auto_dpu
+            maintenance: m, cleanup_seconds: c, auto_del_promos: auto_dp, 
+            auto_del_broadcasts: auto_db, auto_del_purchases: auto_dpu
         })
     });
 }
@@ -2158,14 +2174,21 @@ def restore_pending_orders():
         else:
             threading.Thread(target=expire_qr, args=(chat_id, order.get("qr_msg_id"), order["course_id"], amt_key, order_id), daemon=True).start()
 
+def start_polling():
+    while True:
+        try:
+            bot.remove_webhook()
+            bot.infinity_polling(skip_pending=True)
+        except Exception as e:
+            time.sleep(3)
+
 if __name__ == "__main__":
     try: BOT_USERNAME = bot.get_me().username
     except Exception: pass
     
-    # Start Services
     restore_pending_orders()
     threading.Thread(target=global_sms_checker, daemon=True).start()
     threading.Thread(target=global_memory_cleanup, daemon=True).start()
-    threading.Thread(target=lambda: bot.infinity_polling(skip_pending=True), daemon=True).start()
+    threading.Thread(target=start_polling, daemon=True).start()
     
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
