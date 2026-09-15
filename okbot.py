@@ -92,15 +92,51 @@ except Exception as e:
     print(f"❌ MongoDB Error: {e}")
     sys.exit(1)
 
+
+# ==========================================
+# 🚀 SMART CACHE SYSTEM (SPEED OPTIMIZATION)
+# ==========================================
+db_cache = {}
+cache_lock = threading.Lock()
+
+def get_cached_setting(key, ttl=15):
+    """Caches DB settings in RAM for 15 seconds to eliminate query lag"""
+    now = time.time()
+    with cache_lock:
+        if key in db_cache and now - db_cache[key]['time'] < ttl:
+            return db_cache[key]['data']
+    
+    val = settings_col.find_one({"_id": key})
+    with cache_lock:
+        db_cache[key] = {'data': val, 'time': now}
+    return val
+
+def get_cached_course(course_id, ttl=30):
+    cache_key = f"course_{course_id}"
+    now = time.time()
+    with cache_lock:
+        if cache_key in db_cache and now - db_cache[cache_key]['time'] < ttl:
+            return db_cache[cache_key]['data']
+            
+    val = courses_col.find_one({"course_id": course_id})
+    with cache_lock:
+        db_cache[cache_key] = {'data': val, 'time': now}
+    return val
+
+def invalidate_cache(key):
+    with cache_lock:
+        db_cache.pop(key, None)
+
+
 # ==========================================
 # ⚙️ MAINTENANCE & AUTO-CLEAR SETTINGS
 # ==========================================
 def is_maintenance_mode():
-    cfg = settings_col.find_one({"_id": "system_settings"})
+    cfg = get_cached_setting("system_settings")
     return cfg.get("maintenance", False) if cfg else False
 
 def get_cleanup_settings():
-    cfg = settings_col.find_one({"_id": "system_settings"}) or {}
+    cfg = get_cached_setting("system_settings") or {}
     return {
         "seconds": int(cfg.get("chat_cleanup_seconds", 86400)),
         "del_promos": cfg.get("auto_del_promos", True),
@@ -251,7 +287,7 @@ admin_data, user_states, user_qr_messages, pending_orders, all_orders_cache = {}
 user_cooldowns = {}
 pending_lock = threading.Lock()
 
-def check_rate_limit(user_id, cooldown=2):
+def check_rate_limit(user_id, cooldown=1):
     now = time.time()
     if user_id in user_cooldowns and now - user_cooldowns[user_id] < cooldown: return False
     user_cooldowns[user_id] = now
@@ -259,7 +295,10 @@ def check_rate_limit(user_id, cooldown=2):
 
 def set_user_state(user_id, step, order_id=None, amount_key=None):
     user_states[user_id] = {"step": step, "order_id": order_id, "amount_key": amount_key}
-    users_col.update_one({"user_id": user_id}, {"$set": {"bot_state": step, "bot_state_order": order_id, "bot_state_amt": amount_key}}, upsert=True)
+    def _bg_state():
+        try: users_col.update_one({"user_id": user_id}, {"$set": {"bot_state": step, "bot_state_order": order_id, "bot_state_amt": amount_key}}, upsert=True)
+        except: pass
+    threading.Thread(target=_bg_state, daemon=True).start()
 
 def get_user_state(user_id):
     if user_id in user_states: return user_states[user_id]
@@ -272,7 +311,10 @@ def get_user_state(user_id):
 
 def clear_user_state(user_id):
     user_states.pop(user_id, None)
-    users_col.update_one({"user_id": user_id}, {"$unset": {"bot_state": "", "bot_state_order": "", "bot_state_amt": ""}})
+    def _bg_clear():
+        try: users_col.update_one({"user_id": user_id}, {"$unset": {"bot_state": "", "bot_state_order": "", "bot_state_amt": ""}})
+        except: pass
+    threading.Thread(target=_bg_clear, daemon=True).start()
 
 def generate_unique_amount(base_amount):
     base_clean = round(float(base_amount))
@@ -302,13 +344,16 @@ def check_offer_validity(offer, user_id, course_id=None):
     return True, "ok"
 
 def clear_user_offer(user_id, offer_code):
-    users_col.update_one({"user_id": user_id}, {"$unset": {"active_offer_code": "", "active_offer": ""}})
+    def _bg():
+        try: users_col.update_one({"user_id": user_id}, {"$unset": {"active_offer_code": "", "active_offer": ""}})
+        except: pass
+    threading.Thread(target=_bg, daemon=True).start()
 
 def calculate_final_price(user_id, course_id, base_amount):
     final_price = float(base_amount)
     applied_flash_id = None
     
-    flash_sale = settings_col.find_one({"_id": "flash_sale"})
+    flash_sale = get_cached_setting("flash_sale")
     if flash_sale and flash_sale.get("expires_at_ts", 0) > time.time():
         if flash_sale["target"] == "all" or flash_sale.get("course_id") == course_id:
             limit = flash_sale.get("limit", 0)
@@ -348,7 +393,7 @@ def update_channel_order_status(order, status_type, extra_text=""):
     user_mention = order.get("user_mention", f"User ({order['user_id']})")
     discount_info = f"\n🎟 <b>Offer Applied:</b> {order.get('discount_percent')}% OFF (Original: ₹{order.get('original_amount')})" if order.get("discount_percent") else ""
 
-    course = courses_col.find_one({"course_id": order.get("course_id")})
+    course = get_cached_course(order.get("course_id")) or {}
     ch_name = f"\n📺 <b>Channel:</b> {course.get('channel_name')}" if course and course.get("channel_name") else ""
 
     if status_type == "EXPIRED":
@@ -402,7 +447,7 @@ def expire_qr(chat_id, message_id, course_id, amount_key, order_id):
 
 def deliver_course_to_buyer(order, sms_text=None, is_manual=False):
     order_id, chat_id, user_id, course_id = order["order_id"], order["chat_id"], order["user_id"], order["course_id"]
-    course = courses_col.find_one({"course_id": course_id})
+    course = get_cached_course(course_id)
     new_status = "COMPLETED_MANUAL" if is_manual else "COMPLETED_AUTO"
     
     res = orders_col.update_one({"order_id": order_id, "status": {"$in": ["PENDING", "EXPIRED"]}}, {"$set": {"status": new_status, "delivered_at": get_ist_time(), "delivered_at_ts": time.time()}})
@@ -425,7 +470,7 @@ def deliver_course_to_buyer(order, sms_text=None, is_manual=False):
         except Exception: pass
         return
 
-    succ_cfg = settings_col.find_one({"_id": "success_msg_cfg"}) or {}
+    succ_cfg = get_cached_setting("success_msg_cfg") or {}
     extra_txt = succ_cfg.get("text", "").strip()
     succ_btns = succ_cfg.get("buttons", [])
 
@@ -447,13 +492,17 @@ def deliver_course_to_buyer(order, sms_text=None, is_manual=False):
 
     date_now = get_ist_time()
     verify_type = "MANUAL-APPROVED" if is_manual else "AUTO-VERIFIED"
-    purchases_col.insert_one({"user_id": user_id, "username": order.get("user_mention", f"User ({user_id})"), "item_info": f"{course_id} | Rate: ₹{order['amount']} | {verify_type} (order {order_id})", "date": date_now})
-    if order.get("offer_id"):
-        offers_col.update_one({"offer_code": order["offer_id"]}, {"$inc": {"used_count": 1}})
-        fresh_offer = offers_col.find_one({"offer_code": order["offer_id"]})
-        per_user_limit = (fresh_offer or {}).get("per_user_limit", 1)
-        if per_user_limit != -1 and get_offer_usage_count(user_id, order["offer_id"]) >= per_user_limit:
-            clear_user_offer(user_id, order["offer_id"])
+    
+    def _bg_log():
+        purchases_col.insert_one({"user_id": user_id, "username": order.get("user_mention", f"User ({user_id})"), "item_info": f"{course_id} | Rate: ₹{order['amount']} | {verify_type} (order {order_id})", "date": date_now})
+        if order.get("offer_id"):
+            offers_col.update_one({"offer_code": order["offer_id"]}, {"$inc": {"used_count": 1}})
+            fresh_offer = offers_col.find_one({"offer_code": order["offer_id"]})
+            per_user_limit = (fresh_offer or {}).get("per_user_limit", 1)
+            if per_user_limit != -1 and get_offer_usage_count(user_id, order["offer_id"]) >= per_user_limit:
+                clear_user_offer(user_id, order["offer_id"])
+    threading.Thread(target=_bg_log, daemon=True).start()
+    
     update_channel_order_status(order, "MANUAL_APPROVED" if is_manual else "AUTO_VERIFIED", extra_text=sms_text or "")
 
     manual_msg_id = order.get("manual_msg_id")
@@ -533,14 +582,14 @@ def send_course_to_user(chat_id, course):
     markup = InlineKeyboardMarkup()
     markup.row(InlineKeyboardButton(btn_text, callback_data=f"pay_upi_{course['course_id']}"))
     
-    intl_cfg = settings_col.find_one({"_id": "intl_btn_cfg"})
+    intl_cfg = get_cached_setting("intl_btn_cfg")
     if intl_cfg:
         b_name = intl_cfg.get("btn_name", "🌍 International")
         markup.row(InlineKeyboardButton(b_name, callback_data="show_intl_info"))
     elif INTERNATIONAL_LINK:
         markup.row(InlineKeyboardButton("🌍 International", url=INTERNATIONAL_LINK))
 
-    global_cbtns_cfg = settings_col.find_one({"_id": "global_course_btns"})
+    global_cbtns_cfg = get_cached_setting("global_course_btns")
     if global_cbtns_cfg:
         for b in global_cbtns_cfg.get("buttons", []):
             b_url = b.get("url", "")
@@ -590,11 +639,11 @@ def send_batch_to_user(chat_id, batch):
     raw_cids = batch.get("course_ids", [])
     course_ids = json.loads(raw_cids) if isinstance(raw_cids, str) else raw_cids if isinstance(raw_cids, list) else []
     for cid in course_ids:
-        c_data = courses_col.find_one({"course_id": cid})
+        c_data = get_cached_course(cid)
         if c_data: send_course_to_user(chat_id, c_data)
 
 def send_custom_start_menu(chat_id):
-    cfg = settings_col.find_one({"_id": "start_menu"})
+    cfg = get_cached_setting("start_menu")
     markup = InlineKeyboardMarkup().row(InlineKeyboardButton("📋 View All Plans / Packs", callback_data="user_view_plans"))
     if cfg:
         for b in cfg.get("buttons", []):
@@ -638,7 +687,13 @@ def start_command(message):
 
     if not check_rate_limit(user_id, 1): return
     register_activity(user_id, message.message_id, "general")
-    users_col.update_one({"user_id": user_id}, {"$set": {"user_id": user_id, "updated_at": get_ist_time()}}, upsert=True)
+    
+    # ⚡ FAST BACKGROUND DB WRITE
+    def _bg_start():
+        try: users_col.update_one({"user_id": user_id}, {"$set": {"user_id": user_id, "updated_at": get_ist_time()}}, upsert=True)
+        except: pass
+    threading.Thread(target=_bg_start, daemon=True).start()
+    
     param = message.text.split()[1].strip() if len(message.text.split()) > 1 else ""
 
     if param.startswith("off_"):
@@ -660,7 +715,7 @@ def start_command(message):
         users_col.update_one({"user_id": user_id}, {"$set": {"active_offer_code": offer["offer_code"]}, "$unset": {"active_offer": ""}}, upsert=True)
         bot.send_message(user_id, f"🎉 <b>Congrats! {offer['discount_percent']}% discount activated!</b>", parse_mode="HTML", msg_type="general")
         if offer["target_type"] == "single":
-            c = courses_col.find_one({"course_id": offer["target_course_id"]})
+            c = get_cached_course(offer["target_course_id"])
             if c: send_course_to_user(user_id, c)
             else: send_custom_start_menu(user_id)
         else: send_custom_start_menu(user_id)
@@ -669,7 +724,7 @@ def start_command(message):
         if batch: send_batch_to_user(user_id, batch)
         else: bot.send_message(user_id, "❌ <b>This link has expired.</b>", parse_mode="HTML", msg_type="general")
     elif param.startswith("c_"):
-        course = courses_col.find_one({"course_id": param})
+        course = get_cached_course(param)
         if course: send_course_to_user(user_id, course)
         else: bot.send_message(user_id, "❌ <b>This link is not available.</b>", parse_mode="HTML", msg_type="general")
     elif param.startswith("f_"):
@@ -732,7 +787,7 @@ def handle_all_messages(message):
         u_men = f"<a href='tg://user?id={user_id}'>{message.from_user.first_name}</a> ({u_str})"
         
         course_id = order['course_id'] if order else 'N/A'
-        course_obj = courses_col.find_one({"course_id": course_id}) if order else None
+        course_obj = get_cached_course(course_id) if order else None
         ch_name_display = f"\n📺 <b>Channel:</b> {course_obj.get('channel_name')}" if course_obj and course_obj.get("channel_name") else ""
 
         cap = f"📩 <b>[MANUAL APPROVAL - PAYMENT SCREENSHOT]</b>\n\n👤 <b>User:</b> {u_men}\n🆔 <b>ID:</b> <code>{user_id}</code>\n🔖 <b>Order:</b> <code>{order_id}</code>\n📚 <b>Pack:</b> <code>{course_id}</code>{ch_name_display}\n💰 <b>Amount:</b> ₹{order['amount'] if order else 'N/A'}\n⏰ <b>Time:</b> {get_ist_time()}"
@@ -753,6 +808,7 @@ def handle_all_messages(message):
             cid = message.text.strip()
             if courses_col.delete_one({"course_id": cid}).deleted_count:
                 settings_col.update_one({"_id": "store_plans"}, {"$pull": {"course_ids": cid}})
+                invalidate_cache(f"course_{cid}")
                 bot.send_message(ADMIN_ID, f"✅ <b>Course <code>{cid}</code> Deleted!</b>", parse_mode="HTML")
             else: bot.send_message(ADMIN_ID, f"❌ <b>Not found.</b>", parse_mode="HTML")
             del admin_data[ADMIN_ID]
@@ -761,6 +817,7 @@ def handle_all_messages(message):
             cid = message.text.strip()
             if courses_col.find_one({"course_id": cid}):
                 settings_col.update_one({"_id": "store_plans"}, {"$addToSet": {"course_ids": cid}}, upsert=True)
+                invalidate_cache("store_plans")
                 bot.send_message(ADMIN_ID, f"✅ <b>Course <code>{cid}</code> added to Store Plans!</b>", parse_mode="HTML")
             else: bot.send_message(ADMIN_ID, f"❌ <b>Invalid ID.</b>", parse_mode="HTML")
             del admin_data[ADMIN_ID]
@@ -802,6 +859,7 @@ def handle_all_messages(message):
                     "limit": lim, "created_at_ts": now_ts, "expires_at_ts": now_ts + (admin_data[ADMIN_ID]["hours"] * 3600)
                 }
                 settings_col.update_one({"_id": "flash_sale"}, {"$set": doc}, upsert=True)
+                invalidate_cache("flash_sale")
                 bot.send_message(ADMIN_ID, "🎉 <b>Flash Price Applied Successfully!</b>", parse_mode="HTML")
                 del admin_data[ADMIN_ID]
                 send_admin_panel(ADMIN_ID)
@@ -1133,7 +1191,7 @@ def handle_buttons(call):
     msg_id = call.message.message_id
     data = call.data
 
-    # 1. Close Message Handler (Must run always, no rate limit)
+    # 1. Close Button Handler (Instantly processed)
     if data == "close_msg":
         try: bot.delete_message(chat_id, msg_id)
         except Exception: pass
@@ -1147,22 +1205,25 @@ def handle_buttons(call):
         except Exception: pass
         return
 
-    # 3. Rate Limit
+    # 3. Rate Limiter
     if not check_rate_limit(chat_id, 1.5): 
         try: bot.answer_callback_query(call.id, "⚠️ Please slow down! Don't click too fast.", show_alert=False)
         except Exception: pass
         return
+
+    # 4. INSTANT SIGNAL FIX: Immediately answer callback so Telegram knows button was clicked
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
         
     register_activity(chat_id, msg_id, "general")
 
-    # 4. Custom Payment Responses (These send text in the popup, so they answer it themselves)
+    # 5. Handle Buttons
     if data.startswith("paydone_"):
         oid = data.replace("paydone_", "")
         order = all_orders_cache.get(oid) or orders_col.find_one({"order_id": oid})
-        if not order: return bot.answer_callback_query(call.id, "❌ Order not found.", show_alert=True)
-        if order.get("status") in ("COMPLETED_AUTO", "COMPLETED_MANUAL"): return bot.answer_callback_query(call.id, "✅ Already delivered.", show_alert=True)
+        if not order: return
+        if order.get("status") in ("COMPLETED_AUTO", "COMPLETED_MANUAL"): return
         
-        bot.answer_callback_query(call.id, "⏳ Checking...", show_alert=False)
         amt_key = order.get("amount")
         sms_rec = sms_pool_col.find_one({"amount": amt_key, "status": "UNUSED"})
         if sms_rec:
@@ -1182,7 +1243,6 @@ def handle_buttons(call):
         return
 
     if data.startswith("send_ss_"):
-        bot.answer_callback_query(call.id)
         set_user_state(chat_id, "WAITING_PAYMENT_SS", data.replace("send_ss_", ""))
         bot.send_message(chat_id, "📸 <b>Please send your payment screenshot.</b>", parse_mode="HTML", msg_type="general")
         return
@@ -1190,14 +1250,12 @@ def handle_buttons(call):
     if data.startswith("man_appr_"):
         oid = data.replace("man_appr_", "")
         o = all_orders_cache.get(oid) or orders_col.find_one({"order_id": oid})
-        if not o: return bot.answer_callback_query(call.id, "❌ Order not found.", show_alert=True)
+        if not o: return
         if o.get("status") in ("COMPLETED_AUTO", "COMPLETED_MANUAL"):
-            bot.answer_callback_query(call.id, "ℹ️ Already delivered via SMS.", show_alert=True)
             try: bot.edit_message_reply_markup(chat_id, msg_id, reply_markup=None)
             except Exception: pass
             return
         deliver_course_to_buyer(o, sms_text="Manual Approval", is_manual=True)
-        bot.answer_callback_query(call.id, "✅ Approved!", show_alert=True)
         try:
             bot.edit_message_reply_markup(chat_id, msg_id, reply_markup=None)
             orig_send_message(chat_id, f"✅ <b>ORDER {oid} APPROVED</b>\n⏰ {get_ist_time()}", reply_to_message_id=msg_id, parse_mode="HTML")
@@ -1207,16 +1265,14 @@ def handle_buttons(call):
     if data.startswith("man_deny_"):
         oid = data.replace("man_deny_", "")
         o = all_orders_cache.get(oid) or orders_col.find_one({"order_id": oid})
-        if not o: return bot.answer_callback_query(call.id, "❌ Not found.", show_alert=True)
+        if not o: return
         if o.get("status") in ("COMPLETED_AUTO", "COMPLETED_MANUAL"):
-            bot.answer_callback_query(call.id, "ℹ️ Already delivered.", show_alert=True)
             try: bot.edit_message_reply_markup(chat_id, msg_id, reply_markup=None)
             except Exception: pass
             return
         m = InlineKeyboardMarkup().row(InlineKeyboardButton("💬 Contact Admin", url=CHAT_LINK)) if CHAT_LINK else None
         try: bot.send_message(o["chat_id"], f"❌ <b>Payment Failed!</b>\nOrder <code>{oid}</code> rejected.", reply_markup=m, parse_mode="HTML", msg_type="general")
         except Exception: pass
-        bot.answer_callback_query(call.id, "❌ Rejected.", show_alert=True)
         try:
             bot.edit_message_reply_markup(chat_id, msg_id, reply_markup=None)
             orig_send_message(chat_id, f"❌ <b>ORDER {oid} REJECTED</b>", reply_to_message_id=msg_id, parse_mode="HTML")
@@ -1224,9 +1280,8 @@ def handle_buttons(call):
         return
 
     if data.startswith("pay_upi_"):
-        bot.answer_callback_query(call.id, "⏳ Please wait...", show_alert=False)
         course_id = data.replace("pay_upi_", "")
-        course = courses_col.find_one({"course_id": course_id})
+        course = get_cached_course(course_id)
         if course:
             base_price = float(course["amount"])
             final_price, applied_flash_id, applied_promo_code, promo_disc_pct, flash_sale = calculate_final_price(chat_id, course_id, base_price)
@@ -1241,8 +1296,6 @@ def handle_buttons(call):
                             break
 
             if clicked_price is not None and abs(clicked_price - final_price) > 0.01:
-                bot.answer_callback_query(call.id, f"⚠️ Price updated! Current price is ₹{int(final_price) if final_price.is_integer() else final_price}", show_alert=True)
-                
                 try:
                     bot.send_message(chat_id, f"⚠️ <b>Price Updated / कीमत बदल गई है!</b>\n\nYour previous offer is no longer valid or the price has been updated. The current price is ₹{int(final_price) if final_price.is_integer() else final_price}.\n<i>ऑफर समाप्त हो चुका है या कीमत अपडेट कर दी गई है।</i>", parse_mode="HTML", msg_type="general")
                 except: pass
@@ -1317,12 +1370,7 @@ def handle_buttons(call):
             threading.Timer(QR_EXPIRY_SECONDS, expire_qr, args=(chat_id, sent_msg.message_id, course_id, amt_key, order_id)).start()
         return
 
-
-    # 5. 🛠️ THE FIX: Generic Answer for all Admin / Menu Buttons so they don't Hang
-    try: bot.answer_callback_query(call.id)
-    except Exception: pass
-
-    # --- ALL OTHER BUTTONS (Now they will execute instantly) ---
+    # ADMIN PANEL HANDLERS
     if data == "admin_flash_price":
         m = InlineKeyboardMarkup()
         m.row(InlineKeyboardButton("📈 Price Hike (+)", callback_data="flash_start_hike"), InlineKeyboardButton("📉 Price Drop (-)", callback_data="flash_start_drop"))
@@ -1334,6 +1382,7 @@ def handle_buttons(call):
         bot.edit_message_text("✏️ <b>Enter Percentage:</b>\n(e.g., Send 20 for 20%)", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
     elif data == "flash_reset":
         settings_col.delete_one({"_id": "flash_sale"})
+        invalidate_cache("flash_sale")
         bot.edit_message_text("✅ <b>All prices reset to normal!</b>", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
         send_admin_panel(chat_id)
     elif data == "flash_tgt_all":
@@ -1357,11 +1406,13 @@ def handle_buttons(call):
     elif data == "gcbtn_finish":
         d = admin_data.get(ADMIN_ID, {})
         settings_col.update_one({"_id": "global_course_btns"}, {"$set": {"buttons": d.get("buttons", []), "updated_at": get_ist_time()}}, upsert=True)
+        invalidate_cache("global_course_btns")
         del admin_data[ADMIN_ID]
         bot.edit_message_text("🎉 <b>Global Course Buttons Saved!</b>", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
         send_admin_panel(chat_id)
     elif data == "gcbtn_clear":
         settings_col.delete_one({"_id": "global_course_btns"})
+        invalidate_cache("global_course_btns")
         bot.edit_message_text("✅ <b>Global Course Buttons Cleared!</b>", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
         send_admin_panel(chat_id)
     elif data == "admin_success_msg":
@@ -1378,15 +1429,17 @@ def handle_buttons(call):
     elif data == "succ_finish":
         d = admin_data.get(ADMIN_ID, {})
         settings_col.update_one({"_id": "success_msg_cfg"}, {"$set": {"text": d.get("text", ""), "buttons": d.get("buttons", []), "updated_at": get_ist_time()}}, upsert=True)
+        invalidate_cache("success_msg_cfg")
         del admin_data[ADMIN_ID]
         bot.edit_message_text("🎉 <b>Success Message Settings Saved!</b>", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
         send_admin_panel(chat_id)
     elif data == "succ_clear":
         settings_col.delete_one({"_id": "success_msg_cfg"})
+        invalidate_cache("success_msg_cfg")
         bot.edit_message_text("✅ <b>Success Message Settings Cleared!</b>", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
         send_admin_panel(chat_id)
     elif data == "show_intl_info":
-        cfg = settings_col.find_one({"_id": "intl_btn_cfg"})
+        cfg = get_cached_setting("intl_btn_cfg")
         if not cfg:
             if INTERNATIONAL_LINK:
                 bot.send_message(chat_id, f"🌍 <b>International Payment:</b>\n{INTERNATIONAL_LINK}", parse_mode="HTML", msg_type="general", disable_web_page_preview=True)
@@ -1425,20 +1478,22 @@ def handle_buttons(call):
             "updated_at": get_ist_time()
         }
         settings_col.update_one({"_id": "intl_btn_cfg"}, {"$set": doc}, upsert=True)
+        invalidate_cache("intl_btn_cfg")
         del admin_data[ADMIN_ID]
         bot.edit_message_text("🎉 <b>International Button settings saved successfully!</b>", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
         send_admin_panel(chat_id)
     elif data == "intl_reset_default":
         settings_col.delete_one({"_id": "intl_btn_cfg"})
+        invalidate_cache("intl_btn_cfg")
         bot.edit_message_text("✅ <b>Reset to default International Button!</b>", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
         send_admin_panel(chat_id)
     elif data == "user_view_plans":
-        plans = settings_col.find_one({"_id": "store_plans"})
+        plans = get_cached_setting("store_plans")
         c_ids = plans.get("course_ids", []) if plans else [c["course_id"] for c in courses_col.find().limit(10)]
         if not c_ids: return bot.send_message(chat_id, "ℹ️ No plans available.", parse_mode="HTML", msg_type="general")
         bot.send_message(chat_id, "📚 <b>Available Plans:</b>", parse_mode="HTML", msg_type="general", disable_web_page_preview=True)
         for cid in c_ids:
-            c = courses_col.find_one({"course_id": cid})
+            c = get_cached_course(cid)
             if c: send_course_to_user(chat_id, c)
     elif data == "ctype_text":
         admin_data[ADMIN_ID]["step"] = "SECRET"
@@ -1465,7 +1520,7 @@ def handle_buttons(call):
         admin_data[ADMIN_ID] = {"step": "DELETE_COURSE"}
         bot.edit_message_text("🗑 <b>Delete Course:</b>\nSend Course ID:", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
     elif data == "admin_manage_plans":
-        c_ids = (settings_col.find_one({"_id": "store_plans"}) or {}).get("course_ids", [])
+        c_ids = (get_cached_setting("store_plans") or {}).get("course_ids", [])
         text = f"📋 <b>Manage Store Plans ({len(c_ids)}):</b>\n" + "".join(f"• <code>{cid}</code>\n" for cid in c_ids)
         m = InlineKeyboardMarkup().row(InlineKeyboardButton("➕ Add Course", callback_data="plan_add_id")).row(InlineKeyboardButton("🗑 Clear All", callback_data="plan_clear_all")).row(InlineKeyboardButton("🔙 Back", callback_data="back_to_admin"))
         bot.edit_message_text(text, chat_id=chat_id, message_id=msg_id, reply_markup=m, parse_mode="HTML")
@@ -1474,6 +1529,7 @@ def handle_buttons(call):
         bot.edit_message_text("➕ Send <b>Course ID</b> to add:", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
     elif data == "plan_clear_all":
         settings_col.delete_one({"_id": "store_plans"})
+        invalidate_cache("store_plans")
         bot.send_message(chat_id, "✅ <b>All plans cleared!</b>", parse_mode="HTML")
         send_admin_panel(chat_id)
     elif data == "admin_custom_menu":
@@ -1485,11 +1541,13 @@ def handle_buttons(call):
     elif data == "menu_finish_save":
         c = admin_data.get(ADMIN_ID, {}).get("menu_content", {})
         settings_col.update_one({"_id": "start_menu"}, {"$set": {"media_type": c.get("media_type", "text"), "file_id": c.get("file_id"), "text": c.get("text", ""), "buttons": admin_data.get(ADMIN_ID, {}).get("buttons", []), "updated_at": get_ist_time()}}, upsert=True)
+        invalidate_cache("start_menu")
         del admin_data[ADMIN_ID]
         bot.edit_message_text("🎉 <b>Saved!</b>", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
         send_admin_panel(chat_id)
     elif data == "menu_reset_default":
         settings_col.delete_one({"_id": "start_menu"})
+        invalidate_cache("start_menu")
         bot.edit_message_text("✅ <b>Reset!</b>", chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
         send_admin_panel(chat_id)
     elif data == "admin_add_course":
@@ -1526,7 +1584,7 @@ def handle_buttons(call):
     elif data.startswith("mainmenu_"):
         t = data.replace("mainmenu_", "")
         if t.startswith("c_"):
-            c = courses_col.find_one({"course_id": t})
+            c = get_cached_course(t)
             if c: send_course_to_user(chat_id, c)
         elif t.startswith("b_"):
             b = batches_col.find_one({"batch_id": t})
@@ -1664,12 +1722,14 @@ def api_courses():
 def api_delete_course(course_id):
     courses_col.delete_one({"course_id": course_id})
     settings_col.update_one({"_id": "store_plans"}, {"$pull": {"course_ids": course_id}})
+    invalidate_cache("store_plans")
+    invalidate_cache(f"course_{course_id}")
     return jsonify({"status": "success"})
 
 @app.route("/dashboard/api/courses/<course_id>/buyers")
 @require_auth
 def api_course_buyers(course_id):
-    course = courses_col.find_one({"course_id": course_id})
+    course = get_cached_course(course_id)
     is_channel = bool(course and course.get("channel_id"))
     completed_q = {"course_id": course_id, "status": {"$in": ["COMPLETED_AUTO", "COMPLETED_MANUAL"]}}
     out = []
@@ -1723,7 +1783,7 @@ def api_delete_offer(offer_code):
 def api_system_settings():
     if request.method == "POST":
         data = request.json
-        old_cfg = settings_col.find_one({"_id": "system_settings"}) or {}
+        old_cfg = get_cached_setting("system_settings") or {}
         was_maintenance = old_cfg.get("maintenance", False)
         is_maintenance_now = data.get("maintenance", False)
         
@@ -1736,6 +1796,7 @@ def api_system_settings():
             "updated_at": get_ist_time()
         }
         settings_col.update_one({"_id": "system_settings"}, {"$set": doc}, upsert=True)
+        invalidate_cache("system_settings")
 
         if was_maintenance and not is_maintenance_now:
             def broadcast_back_online():
@@ -1750,7 +1811,7 @@ def api_system_settings():
 
         return jsonify({"status": "success"})
     
-    cfg = settings_col.find_one({"_id": "system_settings"}) or {}
+    cfg = get_cached_setting("system_settings") or {}
     return jsonify({
         "maintenance": cfg.get("maintenance", False),
         "cleanup_seconds": int(cfg.get("chat_cleanup_seconds", 86400)),
